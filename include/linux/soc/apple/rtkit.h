@@ -194,4 +194,13 @@ int apple_rtkit_poll(struct apple_rtkit *rtk);
  */
 bool apple_rtkit_has_endpoint(struct apple_rtkit *rtk, u8 ep);
 
+/*
+ * Generic helper consumers must hold a device link to the bound supplier.
+ * stop() returns zero only after acknowledged RTKit shutdown; on failure all
+ * consumer DMA allocations must remain mapped. A stopped helper cannot be
+ * reused by a newly bound consumer without restarting the supplier.
+ */
+bool apple_rtkit_helper_is_running(struct device *dev);
+int apple_rtkit_helper_stop(struct device *dev);
+
 #endif /* _LINUX_APPLE_RTKIT_H_ */
