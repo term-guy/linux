@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Apple MacBook Pro (14-inch, M5)
+ *
+ * target-type: J704 (Mac17,2)
+ *
+ * Minimal bring-up tree: CPUs, AIC, timer, watchdog and the boot
+ * framebuffer (filled in by m1n1). Everything else is TODO.
+ */
+
+/dts-v1/;
+
+#include "t8142.dtsi"
+
+/ {
+	compatible = "apple,j704", "apple,t8142", "apple,arm-platform";
+	model = "Apple MacBook Pro (14-inch, M5)";
+
+	aliases {
+		serial0 = &serial0;
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		bootargs = "earlycon console=tty0 loglevel=8";
+
+		framebuffer0: framebuffer@0 {
+			compatible = "apple,simple-framebuffer", "simple-framebuffer";
+			reg = <0 0 0 0>; /* To be filled by loader */
+			/* Format properties will be added by loader */
+			status = "disabled";
+		};
+	};
+
+	memory@10000000000 {
+		device_type = "memory";
+		reg = <0x100 0 0x2 0>; /* To be filled by loader */
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		/* To be filled by loader */
+	};
+};
