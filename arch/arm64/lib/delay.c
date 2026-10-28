@@ -42,23 +42,7 @@ void __delay(unsigned long cycles)
 {
 	cycles_t start = __delay_cycles();
 
-	if (alternative_has_cap_unlikely(ARM64_HAS_WFXT)) {
-		u64 end = start + cycles;
-
-		/*
-		 * Start with WFIT. If an interrupt makes us resume
-		 * early, use a WFET loop to complete the delay.
-		 */
-		wfit(end);
-		while ((__delay_cycles() - start) < cycles)
-			wfet(end);
-	} else 	if (arch_timer_evtstrm_available()) {
-		const cycles_t timer_evt_period =
-			USECS_TO_CYCLES(ARCH_TIMER_EVT_STREAM_PERIOD_US);
-
-		while ((__delay_cycles() - start + timer_evt_period) < cycles)
-			wfe();
-	}
+	/* M5 bring-up: exclude all WFx delay paths, independent of caps/bootargs. */
 
 	while ((__delay_cycles() - start) < cycles)
 		cpu_relax();
