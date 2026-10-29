@@ -47,3 +47,16 @@
 		/* To be filled by loader */
 	};
 };
+
+/* Internal SSD (#191). Read-only use until the owner decides otherwise. */
+&ans_mbox {
+	status = "okay";
+};
+
+&sart {
+	status = "okay";
+};
+
+&nvme {
+	status = "okay";
+};
