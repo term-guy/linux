@@ -63,8 +63,9 @@
 };
 
 /*
- * Keyboard and trackpad (MTP over DockChannel, #200). No multi-touch
- * firmware-name yet: the trackpad needs a firmware blob, the keyboard not.
+ * Keyboard and trackpad (MTP over DockChannel, #200). The trackpad needs
+ * its multi-touch firmware (asahi-installer's converter output for the
+ * j704 Multitouch.im4p); the keyboard does not.
  */
 &mtp {
 	status = "okay";
@@ -86,6 +87,7 @@
 	status = "okay";
 
 	multi-touch {
+		firmware-name = "apple/tpmtfw-j704.bin";
 	};
 
 	keyboard: keyboard {
