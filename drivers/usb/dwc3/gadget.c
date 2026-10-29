@@ -309,9 +309,33 @@ int dwc3_send_gadget_generic_command(struct dwc3 *dwc, unsigned int cmd,
  * taken when sending Start Transfer command to ensure that it's done after
  * USB resume.
  */
+/* Temporary M5 SET_CONFIGURATION debug (#116): set by ep0.c on SET_CONFIGURATION. */
+bool m5dbg_gadget_trace;
+void m5dbg_record_int_start(struct dwc3_ep *dep, u32 cmd, int ret);
+
+/*
+ * M5 bring-up debug (#129+): enabling an interrupt IN endpoint (ACM notify)
+ * stops the SET_CONFIGURATION status stage from completing. Bisect knobs:
+ * m5_skip_int_noop: no no-op StartTransfer at enable for interrupt endpoints.
+ * m5_int_fifo: if nonzero, TX FIFO number used for interrupt IN endpoints.
+ */
+static bool m5_skip_int_noop;
+module_param(m5_skip_int_noop, bool, 0444);
+static uint m5_int_fifo;
+module_param(m5_int_fifo, uint, 0444);
+/* Session 10: isolate HW periodic interval versus endpoint type. */
+static uint m5_int_interval_m1 = ~0U;
+module_param(m5_int_interval_m1, uint, 0444);
+static bool m5_int_as_bulk;
+module_param(m5_int_as_bulk, bool, 0444);
+/* Experimental: supply a future, interval-aligned frame to interrupt START. */
+static bool m5_int_start_frame;
+module_param(m5_int_start_frame, bool, 0444);
+
 int dwc3_send_gadget_ep_cmd(struct dwc3_ep *dep, unsigned int cmd,
 		struct dwc3_gadget_ep_cmd_params *params)
 {
+	static unsigned int m5dbg_logged;
 	const struct usb_endpoint_descriptor *desc = dep->endpoint.desc;
 	struct dwc3		*dwc = dep->dwc;
 	u32			timeout = 5000;
@@ -382,6 +406,14 @@ int dwc3_send_gadget_ep_cmd(struct dwc3_ep *dep, unsigned int cmd,
 	else
 		cmd |= DWC3_DEPCMD_CMDACT;
 
+	if (m5_int_start_frame && dep->direction && desc &&
+	    usb_endpoint_xfer_int(desc) && dep->interval &&
+	    DWC3_DEPCMD_CMD(cmd) == DWC3_DEPCMD_STARTTRANSFER) {
+		u32 frame = DWC3_DSTS_SOFFN(dwc3_readl(dwc, DWC3_DSTS));
+
+		frame = (frame + 2 * dep->interval) & ~(dep->interval - 1);
+		cmd |= DWC3_DEPCMD_PARAM(frame);
+	}
 	dwc3_writel(dwc, DWC3_DEPCMD(epnum), cmd);
 
 	if (!(cmd & DWC3_DEPCMD_CMDACT) ||
@@ -433,7 +465,16 @@ int dwc3_send_gadget_ep_cmd(struct dwc3_ep *dep, unsigned int cmd,
 	}
 
 skip_status:
+	if (dep->direction && desc && usb_endpoint_xfer_int(desc) &&
+	    DWC3_DEPCMD_CMD(cmd) == DWC3_DEPCMD_STARTTRANSFER)
+		m5dbg_record_int_start(dep, cmd, ret);
 	trace_dwc3_gadget_ep_cmd(dep, cmd, params, cmd_status);
+	if ((m5dbg_gadget_trace || ret) && m5dbg_logged < 32) {
+		m5dbg_logged++;
+		dev_info(dwc->dev, "m5dbg gadget epcmd %s cmd=%08x p=%08x/%08x/%08x ret=%d st=%d depcmd=%08x left=%u\n",
+			 dep->name, cmd, params->param0, params->param1, params->param2,
+			 ret, cmd_status, dwc3_readl(dwc, DWC3_DEPCMD(epnum)), timeout);
+	}
 
 	if (DWC3_DEPCMD_CMD(cmd) == DWC3_DEPCMD_STARTTRANSFER) {
 		if (ret == 0)
@@ -593,7 +634,9 @@ static int dwc3_gadget_set_ep_config(struct dwc3_ep *dep, unsigned int action)
 
 	memset(&params, 0x00, sizeof(params));
 
-	params.param0 = DWC3_DEPCFG_EP_TYPE(usb_endpoint_type(desc))
+	params.param0 = DWC3_DEPCFG_EP_TYPE(
+		(dep->direction && usb_endpoint_xfer_int(desc) && m5_int_as_bulk)
+		? USB_ENDPOINT_XFER_BULK : usb_endpoint_type(desc))
 		| DWC3_DEPCFG_MAX_PACKET_SIZE(usb_endpoint_maxp(desc));
 
 	/* Burst size is only needed in SuperSpeed mode */
@@ -635,7 +678,9 @@ static int dwc3_gadget_set_ep_config(struct dwc3_ep *dep, unsigned int action)
 	 * We must use the lower 16 TX FIFOs even though
 	 * HW might have more
 	 */
-	if (dep->direction)
+	if (dep->direction && m5_int_fifo && usb_endpoint_xfer_int(desc))
+		params.param0 |= DWC3_DEPCFG_FIFO_NUMBER(m5_int_fifo);
+	else if (dep->direction)
 		params.param0 |= DWC3_DEPCFG_FIFO_NUMBER(dep->number >> 1);
 
 	if (desc->bInterval) {
@@ -657,6 +702,9 @@ static int dwc3_gadget_set_ep_config(struct dwc3_ep *dep, unsigned int action)
 		else
 			dep->interval = 1 << (desc->bInterval - 1);
 
+		if (dep->direction && usb_endpoint_xfer_int(desc) &&
+		    m5_int_interval_m1 <= 13)
+			bInterval_m1 = m5_int_interval_m1;
 		params.param1 |= DWC3_DEPCFG_BINTERVAL_M1(bInterval_m1);
 	}
 
@@ -972,7 +1020,7 @@ static int __dwc3_gadget_ep_enable(struct dwc3_ep *dep, unsigned int action)
 	 * Response Update Transfer command.
 	 */
 	if (usb_endpoint_xfer_bulk(desc) ||
-			usb_endpoint_xfer_int(desc)) {
+			(usb_endpoint_xfer_int(desc) && !m5_skip_int_noop)) {
 		struct dwc3_gadget_ep_cmd_params params;
 		struct dwc3_trb	*trb;
 		dma_addr_t trb_dma;
@@ -4729,6 +4777,9 @@ int dwc3_gadget_init(struct dwc3 *dwc)
 	int ret;
 	int irq;
 	struct device *dev;
+	extern void m5dbg_ep0_premap(struct dwc3 *dwc);
+
+	m5dbg_ep0_premap(dwc);
 
 	irq = dwc3_gadget_get_irq(dwc);
 	if (irq < 0) {

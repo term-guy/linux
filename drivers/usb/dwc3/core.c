@@ -1351,6 +1351,47 @@ static void dwc3_config_threshold(struct dwc3 *dwc)
  *
  * Returns 0 on success otherwise negative errno.
  */
+/*
+ * M5 bring-up debug (#141): GUCTL1 bits to clear after the normal setup
+ * (Linux sets DEV_DECOUPLE_L1L2_EVT bit 31 and DEV_L1_EXIT_BY_HW bit 24,
+ * which iBoot/m1n1 leave clear), e.g. dwc3.m5_guctl1_clear=0x81000000.
+ */
+static uint m5_guctl1_clear;
+module_param(m5_guctl1_clear, uint, 0444);
+/*
+ * #160: GFLADJ bits to clear after reference clock setup (no ref clock in the
+ * DT, so GFLADJ keeps its reset value 0a87f020), e.g. 0x00800000 clears
+ * REFCLK_LPM_SEL so SOF/ITP counters no longer run on ref_clk.
+ */
+static uint m5_gfladj_clear;
+module_param(m5_gfladj_clear, uint, 0444);
+
+/* M5 bring-up debug: try a device soft reset and report, without failing */
+static void m5dbg_csftrst(struct dwc3 *dwc, const char *when)
+{
+	extern void m5dbg_dart_err(phys_addr_t drd, const char *when);
+	struct resource *res = platform_get_resource(to_platform_device(dwc->dev),
+						     IORESOURCE_MEM, 0);
+	u32 reg;
+	int us;
+
+	if (res)
+		m5dbg_dart_err(res->start, when);
+	dev_info(dwc->dev, "m5dbg %s: gusb2phycfg=%08x gusb3pipectl=%08x gctl=%08x dctl=%08x\n",
+		 when, dwc3_readl(dwc, DWC3_GUSB2PHYCFG(0)), dwc3_readl(dwc, DWC3_GUSB3PIPECTL(0)),
+		 dwc3_readl(dwc, DWC3_GCTL), dwc3_readl(dwc, DWC3_DCTL));
+	reg = dwc3_readl(dwc, DWC3_DCTL);
+	dwc3_writel(dwc, DWC3_DCTL, (reg | DWC3_DCTL_CSFTRST) & ~DWC3_DCTL_RUN_STOP);
+	for (us = 0; us < 200000; us += 10) {
+		if (!(dwc3_readl(dwc, DWC3_DCTL) & DWC3_DCTL_CSFTRST)) {
+			dev_info(dwc->dev, "m5dbg %s: CSFTRST cleared after ~%d us\n", when, us);
+			return;
+		}
+		udelay(10);
+	}
+	dev_info(dwc->dev, "m5dbg %s: CSFTRST STUCK\n", when);
+}
+
 int dwc3_core_init(struct dwc3 *dwc)
 {
 	unsigned int		hw_mode;
@@ -1359,9 +1400,11 @@ int dwc3_core_init(struct dwc3 *dwc)
 
 	hw_mode = DWC3_GHWPARAMS0_MODE(dwc->hwparams.hwparams0);
 
+	m5dbg_csftrst(dwc, "pre-phy_setup");
 	ret = dwc3_phy_setup(dwc);
 	if (ret)
 		return ret;
+	m5dbg_csftrst(dwc, "post-phy_setup");
 
 	if (!dwc->ulpi_ready) {
 		ret = dwc3_core_ulpi_init(dwc);
@@ -1409,6 +1452,13 @@ int dwc3_core_init(struct dwc3 *dwc)
 
 	/* Adjust Reference Clock Period */
 	dwc3_ref_clk_period(dwc);
+	if (m5_gfladj_clear) {
+		u32 gfladj = dwc3_readl(dwc, DWC3_GFLADJ);
+
+		dwc3_writel(dwc, DWC3_GFLADJ, gfladj & ~m5_gfladj_clear);
+		dev_info(dwc->dev, "m5dbg gfladj %08x -> %08x\n", gfladj,
+			 dwc3_readl(dwc, DWC3_GFLADJ));
+	}
 
 	dwc3_set_incr_burst_type(dwc);
 
@@ -1501,6 +1551,7 @@ int dwc3_core_init(struct dwc3 *dwc)
 				reg &= ~DWC3_GUCTL1_DEV_FORCE_20_CLK_FOR_30_CLK;
 		}
 
+		reg &= ~m5_guctl1_clear;
 		dwc3_writel(dwc, DWC3_GUCTL1, reg);
 	}
 
@@ -2394,6 +2445,16 @@ static int dwc3_probe(struct platform_device *pdev)
 	if (!res) {
 		dev_err(&pdev->dev, "missing memory resource\n");
 		return -ENODEV;
+	}
+
+	{
+		extern void m5dbg_csftrst_phys(phys_addr_t drd, const char *when);
+		extern void m5_usb2_release(phys_addr_t drd);
+
+		if (of_machine_is_compatible("apple,j704")) {
+			m5_usb2_release(res->start);
+			m5dbg_csftrst_phys(res->start, "dwc3_probe entry, after release");
+		}
 	}
 
 	dwc = devm_kzalloc(&pdev->dev, sizeof(*dwc), GFP_KERNEL);

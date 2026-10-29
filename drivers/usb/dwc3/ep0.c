@@ -9,6 +9,8 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/moduleparam.h>
+#include <asm/cacheflush.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/platform_device.h>
@@ -26,6 +28,11 @@
 #include "debug.h"
 #include "gadget.h"
 #include "io.h"
+
+/* Temporary M5 debug (#119), defined above dwc3_ep0_inspect_setup(). */
+static struct dwc3 *m5dbg_dwc;
+static void m5dbg_block_reads(struct dwc3 *dwc, const char *tag);
+static void m5dbg_cfg_reads(struct dwc3 *dwc, const char *tag);
 
 static void __dwc3_ep0_do_control_status(struct dwc3 *dwc, struct dwc3_ep *dep);
 static void __dwc3_ep0_do_control_data(struct dwc3 *dwc,
@@ -655,6 +662,9 @@ static int dwc3_ep0_set_config(struct dwc3 *dwc, struct usb_ctrlrequest *ctrl)
 		dwc3_gadget_clear_tx_fifos(dwc);
 
 		ret = dwc3_ep0_delegate_req(dwc, ctrl);
+		dev_info(dwc->dev, "m5dbg gadget set_config %u ret=%d\n", cfg, ret);
+		if (m5dbg_dwc == dwc)
+			m5dbg_block_reads(dwc, "post");
 		/* if the cfg matches and the cfg is non zero */
 		if (cfg && (!ret || (ret == USB_GADGET_DELAYED_STATUS))) {
 
@@ -823,6 +833,205 @@ static int dwc3_ep0_std_request(struct dwc3 *dwc, struct usb_ctrlrequest *ctrl)
 	return ret;
 }
 
+/*
+ * Temporary M5 debug (#119): read-only probes of the port3 USB block around
+ * SET_CONFIGURATION. Mappings are made at gadget init (process context) so the
+ * pre/post reads can run in the IRQ path. One line per read: after the #117/#118
+ * wedge an MMIO read into the block never completes, so the last line printed
+ * names it. Addresses are the DT-verified port3 DARTs and NUB pmgr atc3_usb.
+ */
+static void __iomem *m5dbg_dart[2];
+static void __iomem *m5dbg_nub;
+static unsigned int m5dbg_snap;
+
+/* Session 10: cache-cleaned RAM record, recoverable only if WDT preserves DRAM.
+ * word 0 magic, 1 version, 2 phase (1=initialized, 2=START returned,
+ * 3=snapshot complete), 3 used words; 4..7 START ep/cmd/ret/DEPCMD.
+ * Snapshot is diagnostic and intentionally does not acknowledge events.
+ */
+static bool m5_int_end_after_snapshot;
+module_param(m5_int_end_after_snapshot, bool, 0444);
+static u32 m5dbg_ram[128] __aligned(64);
+static void m5dbg_ram_flush(void)
+{
+	dcache_clean_poc((unsigned long)m5dbg_ram,
+			 (unsigned long)(m5dbg_ram + ARRAY_SIZE(m5dbg_ram)));
+}
+static void m5dbg_ram_snapshot_fn(struct work_struct *work)
+{
+	struct dwc3 *dwc = m5dbg_dwc;
+	struct dwc3_event_buffer *evt = dwc->ev_buf;
+	static const u32 offsets[] = {
+		DWC3_DSTS, DWC3_DCTL, DWC3_GSTS, DWC3_DALEPENA,
+		DWC3_GEVNTCOUNT(0), DWC3_GEVNTSIZ(0),
+		DWC3_DEPCMD(0), DWC3_DEPCMD(1), DWC3_DEPCMD(3),
+		DWC3_DEPCMD(5), DWC3_DEPCMDPAR0(5),
+		DWC3_DEPCMDPAR1(5), DWC3_DEPCMDPAR2(5),
+	};
+	u32 n = 8;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(offsets); i++)
+		m5dbg_ram[n++] = dwc3_readl(dwc, offsets[i]);
+	/* Four raw words each: ep0 TRB0/1, ep2in TRB0/1. */
+	memcpy(&m5dbg_ram[n], dwc->ep0_trb, 2 * sizeof(struct dwc3_trb));
+	n += 8;
+	if (dwc->eps[5] && dwc->eps[5]->trb_pool)
+		memcpy(&m5dbg_ram[n], dwc->eps[5]->trb_pool,
+		       2 * sizeof(struct dwc3_trb));
+	n += 8;
+	m5dbg_ram[n++] = evt->lpos;
+	m5dbg_ram[n++] = evt->count;
+	m5dbg_ram[n++] = evt->flags;
+	m5dbg_ram[n++] = evt->length;
+	for (i = 0; i < 16; i++)
+		m5dbg_ram[n++] = READ_ONCE(((u32 *)evt->buf)
+			[((evt->lpos / 4) + i) % (evt->length / 4)]);
+	m5dbg_ram[3] = n;
+	m5dbg_ram[2] = 3;
+	m5dbg_ram_flush();
+	dev_info(dwc->dev, "m5dbg RAM post-START snapshot complete (%u words)\n", n);
+	if (m5_int_end_after_snapshot && dwc->eps[5]) {
+		unsigned long irqflags;
+
+		spin_lock_irqsave(&dwc->lock, irqflags);
+		dwc3_stop_active_transfer(dwc->eps[5], true, true);
+		spin_unlock_irqrestore(&dwc->lock, irqflags);
+		dev_info(dwc->dev, "m5dbg recovery END ep5 flags=%08x cmd=%08x dsts=%08x\n",
+			 dwc->eps[5]->flags, dwc3_readl(dwc, DWC3_DEPCMD(5)),
+			 dwc3_readl(dwc, DWC3_DSTS));
+		for (i = 0; i < n; i += 4)
+			dev_info(dwc->dev, "m5dbg saved[%02u] %08x %08x %08x %08x\n",
+				 i, m5dbg_ram[i], m5dbg_ram[i + 1],
+				 m5dbg_ram[i + 2], m5dbg_ram[i + 3]);
+	}
+}
+static DECLARE_DELAYED_WORK(m5dbg_ram_snapshot, m5dbg_ram_snapshot_fn);
+
+void m5dbg_record_int_start(struct dwc3_ep *dep, u32 cmd, int ret);
+void m5dbg_record_int_start(struct dwc3_ep *dep, u32 cmd, int ret)
+{
+	if (dep->dwc != m5dbg_dwc || m5dbg_ram[2] != 1)
+		return;
+	m5dbg_ram[4] = dep->number;
+	m5dbg_ram[5] = cmd;
+	m5dbg_ram[6] = ret;
+	m5dbg_ram[7] = dwc3_readl(dep->dwc, DWC3_DEPCMD(dep->number));
+	m5dbg_ram[2] = 2;
+	m5dbg_ram_flush();
+	schedule_delayed_work(&m5dbg_ram_snapshot, msecs_to_jiffies(1000));
+}
+
+void m5dbg_ep0_premap(struct dwc3 *dwc);
+void m5dbg_ep0_premap(struct dwc3 *dwc)
+{
+	if (!strstr(dev_name(dwc->dev), "41a280000"))
+		return;
+	m5dbg_dart[0] = ioremap(0x41af00000, 0x4000);
+	m5dbg_dart[1] = ioremap(0x41af80000, 0x4000);
+	m5dbg_nub = ioremap(0x388280000, 0x4000);
+	m5dbg_dwc = dwc;
+	m5dbg_ram[0] = 0x4d355331;
+	m5dbg_ram[1] = 1;
+	m5dbg_ram[2] = 1;
+	m5dbg_ram[3] = 8;
+	m5dbg_ram_flush();
+	{
+		phys_addr_t pa = virt_to_phys(m5dbg_ram);
+		dev_info(dwc->dev, "m5dbg RAM record phys=%pa bytes=%zu magic=4d355331\n",
+			 &pa, sizeof(m5dbg_ram));
+	}
+	/* Same reads once in probe (process ctx, before any USB traffic). */
+	if (m5dbg_nub)
+		dev_info(dwc->dev, "m5dbg gadget init nub atc3_usb=%08x\n",
+			 readl(m5dbg_nub + 0x100));
+	if (m5dbg_dart[0])
+		dev_info(dwc->dev, "m5dbg gadget init dart0 params=%08x\n",
+			 readl(m5dbg_dart[0]));
+	m5dbg_block_reads(dwc, "init");
+	m5dbg_cfg_reads(dwc, "init");
+}
+
+static void m5dbg_block_reads(struct dwc3 *dwc, const char *tag)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(m5dbg_dart); i++)
+		if (m5dbg_dart[i])
+			dev_info(dwc->dev, "m5dbg gadget %s dart%d err=%08x\n", tag, i,
+				 readl(m5dbg_dart[i] + 0x100));
+	dev_info(dwc->dev, "m5dbg gadget %s gsts=%08x\n", tag, dwc3_readl(dwc, DWC3_GSTS));
+	dev_info(dwc->dev, "m5dbg gadget %s buserr=%08x:%08x\n", tag,
+		 dwc3_readl(dwc, DWC3_GBUSERRADDR1), dwc3_readl(dwc, DWC3_GBUSERRADDR0));
+}
+
+/* #123: compare bus/threshold/FIFO setup with m1n1's (read-only). */
+static void m5dbg_cfg_reads(struct dwc3 *dwc, const char *tag)
+{
+	dev_info(dwc->dev, "m5dbg gadget %s sbuscfg=%08x/%08x thr tx=%08x rx=%08x\n", tag,
+		 dwc3_readl(dwc, DWC3_GSBUSCFG0), dwc3_readl(dwc, DWC3_GSBUSCFG1),
+		 dwc3_readl(dwc, DWC3_GTXTHRCFG), dwc3_readl(dwc, DWC3_GRXTHRCFG));
+	dev_info(dwc->dev, "m5dbg gadget %s txfifo0-3=%08x %08x %08x %08x\n", tag,
+		 dwc3_readl(dwc, DWC3_GTXFIFOSIZ(0)), dwc3_readl(dwc, DWC3_GTXFIFOSIZ(1)),
+		 dwc3_readl(dwc, DWC3_GTXFIFOSIZ(2)), dwc3_readl(dwc, DWC3_GTXFIFOSIZ(3)));
+	dev_info(dwc->dev, "m5dbg gadget %s rxfifo0=%08x dcfg=%08x devten=%08x alepena=%08x\n", tag,
+		 dwc3_readl(dwc, DWC3_GRXFIFOSIZ(0)), dwc3_readl(dwc, DWC3_DCFG),
+		 dwc3_readl(dwc, DWC3_DEVTEN), dwc3_readl(dwc, DWC3_DALEPENA));
+	/* #138: periodic-scheduling timing (m1n1: GUCTL 0a416802 GFLADJ 0a87f020) */
+	dev_info(dwc->dev, "m5dbg gadget %s guctl=%08x gfladj=%08x guctl1=%08x guctl2=%08x guctl3=%08x\n", tag,
+		 dwc3_readl(dwc, DWC3_GUCTL), dwc3_readl(dwc, DWC3_GFLADJ),
+		 dwc3_readl(dwc, DWC3_GUCTL1), dwc3_readl(dwc, DWC3_GUCTL2),
+		 dwc3_readl(dwc, DWC3_GUCTL3));
+}
+
+/* #123: TRB ownership after the wedge (CPU-side coherent memory, no MMIO). */
+static void m5dbg_trb_reads(struct dwc3 *dwc, const char *tag)
+{
+	static const u8 eps[] = { 2, 3, 5 };	/* ep1out, ep1in, ep2in */
+	int i;
+
+	dev_info(dwc->dev, "m5dbg gadget %s ep0trb ctrl=%08x/%08x size=%08x/%08x\n", tag,
+		 dwc->ep0_trb[0].ctrl, dwc->ep0_trb[1].ctrl,
+		 dwc->ep0_trb[0].size, dwc->ep0_trb[1].size);
+	for (i = 0; i < ARRAY_SIZE(eps); i++) {
+		struct dwc3_ep *dep = dwc->eps[eps[i]];
+
+		if (!dep || !dep->trb_pool)
+			continue;
+		dev_info(dwc->dev, "m5dbg gadget %s %s trb0 ctrl=%08x size=%08x trb1 ctrl=%08x size=%08x enq=%u deq=%u\n",
+			 tag, dep->name, dep->trb_pool[0].ctrl, dep->trb_pool[0].size,
+			 dep->trb_pool[1].ctrl, dep->trb_pool[1].size,
+			 dep->trb_enqueue, dep->trb_dequeue);
+	}
+}
+
+static void m5dbg_snapshot_fn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(m5dbg_snapshot, m5dbg_snapshot_fn);
+
+static void m5dbg_snapshot_fn(struct work_struct *work)
+{
+	struct dwc3 *dwc = m5dbg_dwc;
+	char tag[8];
+	int i;
+
+	snprintf(tag, sizeof(tag), "snap%u", m5dbg_snap);
+	/* Unrelated block first: does MMIO outside the USB block still complete? */
+	if (m5dbg_nub)
+		dev_info(dwc->dev, "m5dbg gadget %s nub atc3_usb=%08x\n", tag,
+			 readl(m5dbg_nub + 0x100));
+	m5dbg_block_reads(dwc, tag);
+	m5dbg_cfg_reads(dwc, tag);
+	m5dbg_trb_reads(dwc, tag);
+	for (i = 0; i < ARRAY_SIZE(m5dbg_dart); i++)
+		if (m5dbg_dart[i])
+			dev_info(dwc->dev, "m5dbg gadget %s dart%d addr=%08x:%08x\n", tag, i,
+				 readl(m5dbg_dart[i] + 0x174), readl(m5dbg_dart[i] + 0x170));
+	dev_info(dwc->dev, "m5dbg gadget %s dsts=%08x evcnt=%08x\n", tag,
+		 dwc3_readl(dwc, DWC3_DSTS), dwc3_readl(dwc, DWC3_GEVNTCOUNT(0)));
+	if (m5dbg_snap++ == 0)
+		schedule_delayed_work(&m5dbg_snapshot, msecs_to_jiffies(5000));
+}
+
 static void dwc3_ep0_inspect_setup(struct dwc3 *dwc,
 		const struct dwc3_event_depevt *event)
 {
@@ -834,6 +1043,24 @@ static void dwc3_ep0_inspect_setup(struct dwc3 *dwc,
 		goto out;
 
 	trace_dwc3_ctrl_req(dwc, ctrl);
+	{
+		extern bool m5dbg_gadget_trace;
+		static unsigned int m5dbg_setups;
+
+		if (m5dbg_setups++ < 16)
+			dev_info(dwc->dev, "m5dbg gadget setup %02x %02x v=%04x i=%04x l=%u state=%d\n",
+				 ctrl->bRequestType, ctrl->bRequest, le16_to_cpu(ctrl->wValue),
+				 le16_to_cpu(ctrl->wIndex), le16_to_cpu(ctrl->wLength),
+				 dwc->gadget->state);
+		if ((ctrl->bRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD &&
+		    ctrl->bRequest == USB_REQ_SET_CONFIGURATION && !m5dbg_gadget_trace) {
+			m5dbg_gadget_trace = true;
+			if (m5dbg_dwc == dwc) {
+				m5dbg_block_reads(dwc, "pre");
+				schedule_delayed_work(&m5dbg_snapshot, msecs_to_jiffies(1000));
+			}
+		}
+	}
 
 	len = le16_to_cpu(ctrl->wLength);
 	if (!len) {
