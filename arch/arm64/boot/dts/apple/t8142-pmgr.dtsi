@@ -763,6 +763,7 @@
 		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 		reg = <0x4d8 4>;
 		label = "atc0_cio_pcie";
+		status = "disabled"; /* #114: attaching it powers atc0_cio on, which sticks DWC3 CSFTRST (#113) */
 		#power-domain-cells = <0>;
 		power-domains = <&ps_atc0_cio>;
 		#reset-cells = <0>;
@@ -772,6 +773,7 @@
 		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 		reg = <0x4e0 4>;
 		label = "atc0_cio_usb";
+		status = "disabled"; /* #114: attaching it powers atc0_cio on, which sticks DWC3 CSFTRST (#113) */
 		#power-domain-cells = <0>;
 		power-domains = <&ps_atc0_cio>;
 		#reset-cells = <0>;
@@ -781,6 +783,7 @@
 		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 		reg = <0x4e8 4>;
 		label = "atc1_cio_pcie";
+		status = "disabled"; /* #114: attaching it powers atc1_cio on, which sticks DWC3 CSFTRST (#113) */
 		#power-domain-cells = <0>;
 		power-domains = <&ps_atc1_cio>;
 		#reset-cells = <0>;
@@ -790,6 +793,7 @@
 		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 		reg = <0x4f0 4>;
 		label = "atc1_cio_usb";
+		status = "disabled"; /* #114: attaching it powers atc1_cio on, which sticks DWC3 CSFTRST (#113) */
 		#power-domain-cells = <0>;
 		power-domains = <&ps_atc1_cio>;
 		#reset-cells = <0>;
@@ -799,6 +803,7 @@
 		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 		reg = <0x4f8 4>;
 		label = "atc2_cio_pcie";
+		status = "disabled"; /* #114: attaching it powers atc2_cio on, which sticks DWC3 CSFTRST (#113) */
 		#power-domain-cells = <0>;
 		power-domains = <&ps_atc2_cio>;
 		#reset-cells = <0>;
@@ -808,6 +813,7 @@
 		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 		reg = <0x500 4>;
 		label = "atc2_cio_usb";
+		status = "disabled"; /* #114: attaching it powers atc2_cio on, which sticks DWC3 CSFTRST (#113) */
 		#power-domain-cells = <0>;
 		power-domains = <&ps_atc2_cio>;
 		#reset-cells = <0>;
@@ -817,6 +823,7 @@
 		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 		reg = <0x508 4>;
 		label = "atc3_cio_pcie";
+		status = "disabled"; /* #114: attaching it powers atc3_cio on, which sticks DWC3 CSFTRST (#113) */
 		#power-domain-cells = <0>;
 		power-domains = <&ps_atc3_cio>;
 		#reset-cells = <0>;
@@ -826,6 +833,7 @@
 		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 		reg = <0x510 4>;
 		label = "atc3_cio_usb";
+		status = "disabled"; /* #114: attaching it powers atc3_cio on, which sticks DWC3 CSFTRST (#113) */
 		#power-domain-cells = <0>;
 		power-domains = <&ps_atc3_cio>;
 		#reset-cells = <0>;
