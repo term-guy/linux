@@ -107,6 +107,25 @@ static inline struct f_ncm *func_to_ncm(struct usb_function *f)
 #define TX_TIMEOUT_NSECS	300000
 
 /*
+ * M5 bring-up debug (#188): counters for each step of the TX flush (writable
+ * to reset), read from /sys/module/usb_f_ncm/parameters/.
+ */
+static uint m5_tmr_start;	/* timer armed for a new NTB */
+module_param(m5_tmr_start, uint, 0644);
+static uint m5_tmr_fire;	/* ncm_tx_timeout() ran */
+module_param(m5_tmr_fire, uint, 0644);
+static uint m5_tmr_busy;	/* ... and eth_start_xmit(NULL) returned NETDEV_TX_BUSY */
+module_param(m5_tmr_busy, uint, 0644);
+static uint m5_tmr_suspend;	/* ... with the port marked suspended */
+module_param(m5_tmr_suspend, uint, 0644);
+static uint m5_flush_tmr;	/* NTB sent by the timer flush */
+module_param(m5_flush_tmr, uint, 0644);
+static uint m5_flush_none;	/* timer flush found no pending NTB */
+module_param(m5_flush_none, uint, 0644);
+static uint m5_flush_full;	/* NTB sent because it was full */
+module_param(m5_flush_full, uint, 0644);
+
+/*
  * Although max mtu as dictated by u_ether is 15412 bytes, setting
  * max_segment_size to 15426 would not be efficient. If user chooses segment
  * size to be (>= 8192), then we can't aggregate more than one buffer in each
@@ -1045,6 +1064,7 @@ static struct sk_buff *ncm_wrap_ntb(struct gether *port,
 		    div + rem + skb->len +
 		    ncm->skb_tx_ndp->len + ndp_align + (2 * dgram_idx_len))
 		    > max_size)) {
+			m5_flush_full++;
 			skb2 = package_for_tx(ncm);
 			if (!skb2)
 				goto err;
@@ -1092,6 +1112,7 @@ static struct sk_buff *ncm_wrap_ntb(struct gether *port,
 			/* Note: we skip opts->next_ndp_index */
 
 			/* Start the timer. */
+			m5_tmr_start++;
 			hrtimer_start(&ncm->task_timer, TX_TIMEOUT_NSECS,
 				      HRTIMER_MODE_REL_SOFT);
 		}
@@ -1120,9 +1141,12 @@ static struct sk_buff *ncm_wrap_ntb(struct gether *port,
 		 * because eth_start_xmit() was called with NULL skb by
 		 * ncm_tx_timeout() - hence, this is our signal to flush/send.
 		 */
+		m5_flush_tmr++;
 		skb2 = package_for_tx(ncm);
 		if (!skb2)
 			goto err;
+	} else {
+		m5_flush_none++;
 	}
 
 	return skb2;
@@ -1158,8 +1182,15 @@ static enum hrtimer_restart ncm_tx_timeout(struct hrtimer *data)
 		 *
 		 * This will call directly into u_ether's eth_start_xmit()
 		 */
-		if (netdev->netdev_ops->ndo_start_xmit(NULL, netdev) == NETDEV_TX_BUSY &&
-		    !ncm->port.is_suspend) {
+		netdev_tx_t ret;
+
+		m5_tmr_fire++;
+		if (ncm->port.is_suspend)
+			m5_tmr_suspend++;
+		ret = netdev->netdev_ops->ndo_start_xmit(NULL, netdev);
+		if (ret == NETDEV_TX_BUSY)
+			m5_tmr_busy++;
+		if (ret == NETDEV_TX_BUSY && !ncm->port.is_suspend) {
 			/*
 			 * All IN requests are in flight, so the pending NTB
 			 * was not sent. The timer is only started for a new
