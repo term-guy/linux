@@ -1406,6 +1406,27 @@ static int apple_dart_parse_sid_remap(struct apple_dart *dart)
 /* M5 bring-up debug, drivers/usb/dwc3/m5-usb2-prep.c */
 extern void m5dbg_csftrst_phys(phys_addr_t drd, const char *when);
 
+/*
+ * Only the USB DARTs sit 0xc80000 above their DWC3; for any other
+ * DART (e.g. the MTP DART, #202) the derived address is unrelated MMIO and the
+ * CSFTRST write resets the SoC.
+ */
+static phys_addr_t m5dbg_usb_drd(const struct resource *res)
+{
+	static const phys_addr_t drds[] = {
+		0x402280000, 0x40a280000, 0x412280000, 0x41a280000,
+	};
+	phys_addr_t drd = (res->start & ~0xfffffULL) - 0xc80000;
+	int i;
+
+	if (!of_machine_is_compatible("apple,j704"))
+		return 0;
+	for (i = 0; i < ARRAY_SIZE(drds); i++)
+		if (drd == drds[i])
+			return drd;
+	return 0;
+}
+
 static int apple_dart_probe(struct platform_device *pdev)
 {
 	int ret;
@@ -1503,9 +1524,8 @@ static int apple_dart_probe(struct platform_device *pdev)
 		goto err_clk_disable;
 	}
 
-	if (of_machine_is_compatible("apple,j704"))
-		m5dbg_csftrst_phys((res->start & ~0xfffffULL) - 0xc80000,
-				   "dart probe start (before hw_reset)");
+	if (m5dbg_usb_drd(res))
+		m5dbg_csftrst_phys(m5dbg_usb_drd(res), "dart probe start (before hw_reset)");
 	dart->locked = apple_dart_is_locked(dart);
 	ret = apple_dart_parse_sid_remap(dart);
 	if (ret)
@@ -1513,9 +1533,8 @@ static int apple_dart_probe(struct platform_device *pdev)
 
 	if (!dart->locked) {
 		ret = apple_dart_hw_reset(dart);
-		if (of_machine_is_compatible("apple,j704"))
-			m5dbg_csftrst_phys((res->start & ~0xfffffULL) - 0xc80000,
-					   "right after dart hw_reset");
+		if (m5dbg_usb_drd(res))
+			m5dbg_csftrst_phys(m5dbg_usb_drd(res), "right after dart hw_reset");
 		if (ret)
 			goto err_clk_disable;
 	}
