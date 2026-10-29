@@ -175,6 +175,10 @@ struct apple_nvme_hw {
 	u32 max_queue_depth;
 };
 
+/* M5 bring-up debug (#196): log the PRP setup of the next N I/O commands. */
+static int m5_prp_log;
+module_param(m5_prp_log, int, 0644);
+
 struct apple_nvme {
 	struct device *dev;
 
@@ -520,6 +524,26 @@ static blk_status_t apple_nvme_setup_prps(struct apple_nvme *anv,
 done:
 	cmnd->dptr.prp1 = cpu_to_le64(sg_dma_address(iod->sg));
 	cmnd->dptr.prp2 = cpu_to_le64(iod->first_dma);
+	if (m5_prp_log > 0) {
+		struct scatterlist *s;
+		int k;
+
+		m5_prp_log--;
+		dev_info(anv->dev, "M5 prp: tag %d slba %llu len %u nents %d npages %d prp1 %llx prp2 %llx\n",
+			 req->tag, le64_to_cpu(cmnd->slba), blk_rq_payload_bytes(req),
+			 iod->nents, iod->npages, le64_to_cpu(cmnd->dptr.prp1),
+			 le64_to_cpu(cmnd->dptr.prp2));
+		for_each_sg(iod->sg, s, iod->nents, k)
+			if (k < 3 || k == iod->nents - 1)
+				dev_info(anv->dev, "M5 prp:   sg[%d] %llx+%x\n", k,
+					 (u64)sg_dma_address(s), sg_dma_len(s));
+		if (iod->npages > 0) {
+			__le64 *pl = list[0];
+
+			dev_info(anv->dev, "M5 prp:   list[0..2] %llx %llx %llx\n",
+				 le64_to_cpu(pl[0]), le64_to_cpu(pl[1]), le64_to_cpu(pl[2]));
+		}
+	}
 	return BLK_STS_OK;
 free_prps:
 	apple_nvme_free_prps(anv, req);
