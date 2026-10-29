@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Bring-up variant (#115): only the right-side USB-C port (atc3, DWC3 0x41a280000,
+ * the port cabled to the host) exposes a UDC, so legacy g_serial binds there.
+ */
+#include "t8142-j704.dts"
+
+&dwc3_0 {
+	status = "disabled";
+};
+
+&dwc3_1 {
+	status = "disabled";
+};

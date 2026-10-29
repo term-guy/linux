@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Debug variant (#139): right-port-only UDC with USB2 LPM disabled for the
+ * gadget (no LPM_CAP in DCFG, no LPM in BOS). Tests whether USB2 L1/LPM is
+ * involved in interrupt-IN STARTTRANSFER wedging the controller.
+ */
+#include "t8142-j704-usb-right.dts"
+
+&dwc3_3 {
+	snps,usb2-gadget-lpm-disable;
+};

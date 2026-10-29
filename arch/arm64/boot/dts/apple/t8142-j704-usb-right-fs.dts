@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Debug variant (#159): right-port-only UDC limited to full speed. FS
+ * schedules periodic endpoints per 1 ms frame (no microframes); tests whether
+ * interrupt-IN STARTTRANSFER wedging the controller is HS-specific.
+ */
+#include "t8142-j704-usb-right.dts"
+
+&dwc3_3 {
+	maximum-speed = "full-speed";
+};
