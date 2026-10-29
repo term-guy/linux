@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/err.h>
+#include <linux/workqueue.h>
 
 #include <linux/usb/gadget.h>
 
@@ -63,6 +64,8 @@ struct f_acm {
 	u16				port_handshake_bits;
 	/* SerialState notification -- CDC 1.1 section 6.3.5 (OUTPUT) */
 	u16				serial_state;
+
+	struct delayed_work		m5_notify_work;	/* M5 debug, see m5_notify_delay_ms */
 };
 
 static inline struct f_acm *func_to_acm(struct usb_function *f)
@@ -573,6 +576,20 @@ static void acm_cdc_notify_complete(struct usb_ep *ep, struct usb_request *req)
 		acm_notify_serial_state(acm);
 }
 
+/*
+ * M5 bring-up debug (#128): skip the SERIAL_STATE notify queued on connect,
+ * to tell "interrupt IN endpoint enabled" from "notify TRB pending" as the
+ * trigger for the SET_CONFIGURATION status stage never completing.
+ */
+static bool m5_no_notify;
+module_param(m5_no_notify, bool, 0444);
+/* #132: if nonzero, send the connect notify this many ms later instead. */
+static uint m5_notify_delay_ms;
+module_param(m5_notify_delay_ms, uint, 0444);
+/* #158: if nonzero, notify endpoint wMaxPacketSize (default 10, not 8/16-aligned). */
+static uint m5_notify_maxpacket;
+module_param(m5_notify_maxpacket, uint, 0444);
+
 /* connect == the TTY link is open */
 
 static void acm_connect(struct gserial *port)
@@ -580,6 +597,19 @@ static void acm_connect(struct gserial *port)
 	struct f_acm		*acm = port_to_acm(port);
 
 	acm->serial_state |= USB_CDC_SERIAL_STATE_DSR | USB_CDC_SERIAL_STATE_DCD;
+	if (m5_notify_delay_ms)
+		schedule_delayed_work(&acm->m5_notify_work,
+				      msecs_to_jiffies(m5_notify_delay_ms));
+	else if (!m5_no_notify)
+		acm_notify_serial_state(acm);
+}
+
+static void acm_m5_notify_fn(struct work_struct *work)
+{
+	struct f_acm *acm = container_of(to_delayed_work(work), struct f_acm,
+					 m5_notify_work);
+
+	pr_info("m5dbg acm: delayed connect notify\n");
 	acm_notify_serial_state(acm);
 }
 
@@ -588,7 +618,16 @@ static void acm_disconnect(struct gserial *port)
 	struct f_acm		*acm = port_to_acm(port);
 
 	acm->serial_state &= ~(USB_CDC_SERIAL_STATE_DSR | USB_CDC_SERIAL_STATE_DCD);
-	acm_notify_serial_state(acm);
+	/*
+	 * acm_set_alt(data) sees notify->enabled (just set by set_alt(ctrl)) on
+	 * the very first SET_CONFIGURATION and calls gserial_disconnect(), so
+	 * this path also notifies inside the control transfer.
+	 */
+	if (m5_notify_delay_ms)
+		schedule_delayed_work(&acm->m5_notify_work,
+				      msecs_to_jiffies(m5_notify_delay_ms));
+	else if (!m5_no_notify)
+		acm_notify_serial_state(acm);
 }
 
 static int acm_send_break(struct gserial *port, int duration)
@@ -661,6 +700,10 @@ acm_bind(struct usb_configuration *c, struct usb_function *f)
 		return -ENODEV;
 	acm->port.out = ep;
 
+	if (m5_notify_maxpacket >= 10 && m5_notify_maxpacket <= 64) {
+		acm_fs_notify_desc.wMaxPacketSize = cpu_to_le16(m5_notify_maxpacket);
+		acm_hs_notify_desc.wMaxPacketSize = cpu_to_le16(m5_notify_maxpacket);
+	}
 	ep = usb_ep_autoconfig(cdev->gadget, &acm_fs_notify_desc);
 	if (!ep)
 		return -ENODEV;
@@ -723,6 +766,7 @@ static void acm_free_func(struct usb_function *f)
 
 	opts = container_of(f->fi, struct f_serial_opts, func_inst);
 
+	cancel_delayed_work_sync(&acm->m5_notify_work);
 	kfree(acm);
 	mutex_lock(&opts->lock);
 	opts->instances--;
@@ -753,6 +797,7 @@ static struct usb_function *acm_alloc_func(struct usb_function_instance *fi)
 		return ERR_PTR(-ENOMEM);
 
 	spin_lock_init(&acm->lock);
+	INIT_DELAYED_WORK(&acm->m5_notify_work, acm_m5_notify_fn);
 
 	acm->port.connect = acm_connect;
 	acm->port.disconnect = acm_disconnect;
