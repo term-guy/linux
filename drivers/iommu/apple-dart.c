@@ -1317,6 +1317,9 @@ static bool apple_dart_is_locked(struct apple_dart *dart)
 	return !!(readl(dart->regs + dart->hw->lock) & dart->hw->lock_bit);
 }
 
+/* M5 bring-up debug, drivers/usb/dwc3/m5-usb2-prep.c */
+extern void m5dbg_csftrst_phys(phys_addr_t drd, const char *when);
+
 static int apple_dart_probe(struct platform_device *pdev)
 {
 	int ret;
@@ -1415,9 +1418,15 @@ static int apple_dart_probe(struct platform_device *pdev)
 		goto err_clk_disable;
 	}
 
+	if (of_machine_is_compatible("apple,j704"))
+		m5dbg_csftrst_phys((res->start & ~0xfffffULL) - 0xc80000,
+				   "dart probe start (before hw_reset)");
 	dart->locked = apple_dart_is_locked(dart);
 	if (!dart->locked) {
 		ret = apple_dart_hw_reset(dart);
+		if (of_machine_is_compatible("apple,j704"))
+			m5dbg_csftrst_phys((res->start & ~0xfffffULL) - 0xc80000,
+					   "right after dart hw_reset");
 		if (ret)
 			goto err_clk_disable;
 	}

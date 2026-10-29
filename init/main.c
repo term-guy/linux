@@ -1394,6 +1394,12 @@ static int __init ignore_unknown_bootoption(char *param, char *val,
 	return 0;
 }
 
+/* Temporary M5 USB reset localization; strong implementation in debug DWC3. */
+void __init m5_usb2_device_initcall_checkpoint(initcall_t fn);
+void __init __weak m5_usb2_device_initcall_checkpoint(initcall_t fn)
+{
+}
+
 static void __init do_initcall_level(int level, char *command_line)
 {
 	initcall_entry_t *fn;
@@ -1405,8 +1411,13 @@ static void __init do_initcall_level(int level, char *command_line)
 		   NULL, ignore_unknown_bootoption);
 
 	do_trace_initcall_level(initcall_level_names[level]);
-	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++)
+	if (level == 6)
+		m5_usb2_device_initcall_checkpoint(NULL);
+	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++) {
 		do_one_initcall(initcall_from_entry(fn));
+		if (level == 6)
+			m5_usb2_device_initcall_checkpoint(initcall_from_entry(fn));
+	}
 }
 
 static void __init do_initcalls(void)

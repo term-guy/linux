@@ -50,6 +50,10 @@ struct apple_pmgr_ps {
 	bool externally_clocked;
 };
 
+/* Temporary M5 USB reset localization (#113); implementation in dwc3/m5-usb2-prep.c. */
+extern void m5pm_record(const char *name, u32 off, char tag, u32 before, u32 after);
+extern void m5pm_checkpoint(const char *name, u32 off, const char *stage);
+
 #define genpd_to_apple_pmgr_ps(_genpd) container_of(_genpd, struct apple_pmgr_ps, genpd)
 #define rcdev_to_apple_pmgr_ps(_rcdev) container_of(_rcdev, struct apple_pmgr_ps, rcdev)
 
@@ -57,11 +61,12 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 {
 	int ret;
 	struct apple_pmgr_ps *ps = genpd_to_apple_pmgr_ps(genpd);
-	u32 reg, cur;
+	u32 reg, cur, orig;
 
 	ret = regmap_read(ps->regmap, ps->offset, &reg);
 	if (ret < 0)
 		return ret;
+	orig = reg;
 
 	/* Resets are synchronous, and only work if the device is powered and clocked. */
 	if (reg & APPLE_PMGR_RESET && pstate != APPLE_PMGR_PS_ACTIVE)
@@ -77,6 +82,7 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 			reg_pre |= APPLE_PMGR_PS_RESET;
 
 		regmap_write(ps->regmap, ps->offset, reg_pre);
+		m5pm_record(genpd->name, ps->offset, 'P', orig, reg_pre);
 
 		ret = regmap_read_poll_timeout_atomic(
 			ps->regmap, ps->offset, cur,
@@ -96,6 +102,7 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 	dev_dbg(ps->dev, "PS %s: pwrstate = 0x%x: 0x%x\n", genpd->name, pstate, reg);
 
 	regmap_write(ps->regmap, ps->offset, reg);
+	m5pm_record(genpd->name, ps->offset, 'T', orig, reg);
 
 	if (ps->externally_clocked && pstate == APPLE_PMGR_PS_ACTIVE) {
 		/*
@@ -121,6 +128,7 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 		/* Not all devices implement this; this is a no-op where not implemented. */
 		reg |= APPLE_PMGR_AUTO_ENABLE;
 		regmap_write(ps->regmap, ps->offset, reg);
+		m5pm_record(genpd->name, ps->offset, 'E', cur, reg);
 	}
 
 	return ret;
@@ -161,6 +169,7 @@ static int apple_pmgr_reset_assert(struct reset_controller_dev *rcdev, unsigned 
 		dev_err(ps->dev, "PS 0x%x: asserting RESET while powered down\n", ps->offset);
 
 	dev_dbg(ps->dev, "PS 0x%x: assert reset\n", ps->offset);
+	m5pm_record(ps->genpd.name, ps->offset, 'R', 0, 0);
 	/* Quiesce device before asserting reset */
 	regmap_update_bits(ps->regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_DEV_DISABLE,
 			   APPLE_PMGR_DEV_DISABLE);
@@ -180,6 +189,7 @@ static int apple_pmgr_reset_deassert(struct reset_controller_dev *rcdev, unsigne
 	spin_lock_irqsave(&ps->genpd.slock, flags);
 
 	dev_dbg(ps->dev, "PS 0x%x: deassert reset\n", ps->offset);
+	m5pm_record(ps->genpd.name, ps->offset, 'r', 0, 0);
 	regmap_update_bits(ps->regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_RESET, 0);
 	regmap_update_bits(ps->regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_DEV_DISABLE, 0);
 
@@ -237,6 +247,7 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	int ret;
 	const char *name;
 	bool active;
+	u32 dbg0, dbg1;
 
 	regmap = syscon_node_to_regmap(node->parent);
 	if (IS_ERR(regmap))
@@ -260,6 +271,7 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 		dev_err(dev, "missing reg property\n");
 		return ret;
 	}
+	m5pm_checkpoint(name, ps->offset, "entry");
 
 	ps->genpd.flags |= GENPD_FLAG_IRQ_SAFE;
 	ps->genpd.name = name;
@@ -267,9 +279,14 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	ps->genpd.power_off = apple_pmgr_ps_power_off;
 
 	ret = of_property_read_u32(node, "apple,min-state", &ps->min_state);
-	if (ret == 0 && ps->min_state <= APPLE_PMGR_PS_ACTIVE)
+	if (ret == 0 && ps->min_state <= APPLE_PMGR_PS_ACTIVE) {
+		regmap_read(regmap, ps->offset, &dbg0);
 		regmap_update_bits(regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_PS_MIN,
 				   FIELD_PREP(APPLE_PMGR_PS_MIN, ps->min_state));
+		regmap_read(regmap, ps->offset, &dbg1);
+		m5pm_record(name, ps->offset, 'M', dbg0, dbg1);
+		m5pm_checkpoint(name, ps->offset, "min");
+	}
 
 	if (of_property_read_bool(node, "apple,force-disable"))
 		ps->force_disable = true;
@@ -287,27 +304,35 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 			dev_warn(dev, "always-on domain %s is not on at boot\n", name);
 			/* Turn it on so pm_genpd_init does not fail */
 			active = apple_pmgr_ps_power_on(&ps->genpd) == 0;
+			m5pm_checkpoint(name, ps->offset, "aon-on");
 		}
 	} else if (active) {
 		ps->genpd.flags |= GENPD_FLAG_DEFER_OFF | GENPD_FLAG_ACTIVE_WAKEUP;
 	}
 
 	/* Turn on auto-PM if the domain is already on */
-	if (active)
+	if (active) {
+		regmap_read(regmap, ps->offset, &dbg0);
 		regmap_update_bits(regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_AUTO_ENABLE,
 				   APPLE_PMGR_AUTO_ENABLE);
+		regmap_read(regmap, ps->offset, &dbg1);
+		m5pm_record(name, ps->offset, 'A', dbg0, dbg1);
+		m5pm_checkpoint(name, ps->offset, "auto");
+	}
 
 	ret = pm_genpd_init(&ps->genpd, NULL, !active);
 	if (ret < 0) {
 		dev_err(dev, "pm_genpd_init failed\n");
 		return ret;
 	}
+	m5pm_checkpoint(name, ps->offset, "genpd");
 
 	ret = of_genpd_add_provider_simple(node, &ps->genpd);
 	if (ret < 0) {
 		dev_err(dev, "of_genpd_add_provider_simple failed\n");
 		return ret;
 	}
+	m5pm_checkpoint(name, ps->offset, "provider");
 
 	of_for_each_phandle(&it, ret, node, "power-domains", "#power-domain-cells", -1) {
 		struct of_phandle_args parent, child;
@@ -333,7 +358,9 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	 * Do not participate in regular PM; parent power domains are handled via the
 	 * genpd hierarchy.
 	 */
+	m5pm_checkpoint(name, ps->offset, "subdom");
 	pm_genpd_remove_device(dev);
+	m5pm_checkpoint(name, ps->offset, "rmdev");
 
 	ps->rcdev.owner = THIS_MODULE;
 	ps->rcdev.nr_resets = 1;
@@ -346,10 +373,12 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto err_remove;
 
+	m5pm_checkpoint(name, ps->offset, "exit");
 	return 0;
 err_remove:
 	of_genpd_del_provider(node);
 	pm_genpd_remove(&ps->genpd);
+	m5pm_checkpoint(name, ps->offset, ret == -EPROBE_DEFER ? "defer" : "err");
 	return ret;
 }
 
