@@ -9,6 +9,7 @@
 #include <dt-bindings/interrupt-controller/apple-aic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/pinctrl/apple.h>
+#include <dt-bindings/spmi/spmi.h>
 
 / {
 	compatible = "apple,t8142", "apple,arm-platform";
@@ -462,6 +463,63 @@
 			             <AIC_IRQ 579 IRQ_TYPE_LEVEL_HIGH>,
 			             <AIC_IRQ 580 IRQ_TYPE_LEVEL_HIGH>;
 			status = "disabled"; /* npins unverified on T8142 */
+		};
+
+		/*
+		 * From the ADT: nub-spmi0 (pmu-main, "pmu,abbey" at USID 0xe) and smc
+		 * (ascwrap-v6, IRQs 633-636, shared SRAM = iop-smc-nub region-base/size).
+		 * The PMU scratchpad offsets (info-rtc_scrpad 0x2100, info-pm_setting,
+		 * info-fault_shadow, info-scrpad_socd, info-leg_scrpad) match t6031.
+		 * Only the RTC is described so far.
+		 */
+		nub_spmi: spmi@388714000 {
+			/* generation 4 (ADT gen = 4): not register compatible with t8103 */
+			compatible = "apple,t8142-spmi";
+			reg = <0x3 0x88714000 0x0 0x4000>;
+			#address-cells = <2>;
+			#size-cells = <0>;
+
+			pmic1: pmic@e {
+				compatible = "apple,abbey-pmic", "apple,spmi-nvmem";
+				reg = <0xe SPMI_USID>;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					rtc_offset: rtc-offset@2100 {
+						reg = <0x2100 0x6>;
+					};
+				};
+			};
+		};
+
+		smc: smc@38c600000 {
+			compatible = "apple,t8142-smc", "apple,smc";
+			reg = <0x3 0x8c600000 0x0 0x4000>,
+			      <0x3 0x8de00000 0x0 0x120000>;
+			reg-names = "smc", "sram";
+			mboxes = <&smc_mbox>;
+
+			rtc {
+				compatible = "apple,smc-rtc";
+				nvmem-cells = <&rtc_offset>;
+				nvmem-cell-names = "rtc_offset";
+			};
+		};
+
+		smc_mbox: mbox@38c608000 {
+			compatible = "apple,t8142-asc-mailbox", "apple,asc-mailbox-v4";
+			reg = <0x3 0x8c608000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 633 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 634 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 635 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 636 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+					  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
 		};
 
 		pinctrl_smc: pinctrl@38c820000 {
