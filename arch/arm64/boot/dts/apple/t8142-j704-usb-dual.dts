@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Bring-up variant: USB2 gadget on the right-side port (atc3, DWC3 0x41a280000)
+ * or the left-front port (atc0, DWC3 0x402280000), whichever has the host
+ * cable; userspace (m5-udc-pick) binds the gadget to the port a host
+ * configures. The left-back port (atc1) is the charging port and stays off.
+ */
+#include "t8142-j704.dts"
+
+&dwc3_1 {
+	status = "disabled";
+};
