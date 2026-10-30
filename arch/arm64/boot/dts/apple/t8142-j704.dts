@@ -11,6 +11,7 @@
 /dts-v1/;
 
 #include "t8142.dtsi"
+#include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/leds/common.h>
 
 / {
@@ -102,6 +103,8 @@
 
 	multi-touch {
 		firmware-name = "apple/tpmtfw-j704.bin";
+		/* ADT function-afe-reset: SMC key gP1c, active low */
+		reset-gpios = <&smc_gpio 28 GPIO_ACTIVE_LOW>;
 	};
 
 	keyboard: keyboard {
