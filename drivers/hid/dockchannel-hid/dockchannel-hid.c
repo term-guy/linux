@@ -173,6 +173,8 @@ struct dchid_iface {
 	struct gpio_desc *gpio;
 	char gpio_name[MAX_GPIO_NAME];
 	int gpio_id;
+	struct gpio_desc *reset_gpio;
+	bool reset_checked;
 
 	struct mutex out_mutex;
 	spinlock_t out_lock;
@@ -633,6 +635,42 @@ static int dchid_request_gpio(struct dchid_iface *iface)
 	return 0;
 }
 
+/*
+ * T8142: the multi-touch AFE reset is an SMC GPIO (ADT function-afe-reset)
+ * that the MTP firmware never asks the host to drive. After a full power-off
+ * the AFE does not boot ("No HINT_L") until it has been pulsed, so pulse it
+ * before the firmware is sent. Without a reset-gpios property this is a no-op.
+ */
+static int dchid_reset_afe(struct dchid_iface *iface)
+{
+	struct gpio_desc *gpio;
+
+	if (!iface->reset_checked) {
+		gpio = devm_fwnode_gpiod_get(iface->dchid->dev,
+					     of_fwnode_handle(iface->of_node),
+					     "reset", GPIOD_OUT_LOW, iface->name);
+		if (IS_ERR(gpio)) {
+			if (PTR_ERR(gpio) != -ENOENT)
+				return dev_err_probe(iface->dchid->dev, PTR_ERR(gpio),
+						     "Failed to get %s reset GPIO\n",
+						     iface->name);
+			gpio = NULL;
+		}
+		iface->reset_gpio = gpio;
+		iface->reset_checked = true;
+	}
+
+	if (!iface->reset_gpio)
+		return 0;
+
+	dev_info(iface->dchid->dev, "Pulsing %s reset\n", iface->name);
+	gpiod_set_value_cansleep(iface->reset_gpio, 1);
+	msleep(20);
+	gpiod_set_value_cansleep(iface->reset_gpio, 0);
+	msleep(20);
+	return 0;
+}
+
 static int dchid_start_interface(struct dchid_iface *iface)
 {
 	void *fw = NULL;
@@ -666,6 +704,9 @@ static int dchid_start_interface(struct dchid_iface *iface)
 
 	/* Only multi-touch has firmware */
 	if (fw && size) {
+		ret = dchid_reset_afe(iface);
+		if (ret < 0)
+			goto err;
 
 		/* Send firmware to the device */
 		dev_info(iface->dchid->dev, "Sending firmware for %s\n", iface->name);
