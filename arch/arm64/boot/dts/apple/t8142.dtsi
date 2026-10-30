@@ -515,6 +515,7 @@
 			};
 		};
 
+
 		smc: smc@38c600000 {
 			compatible = "apple,t8142-smc", "apple,smc";
 			reg = <0x3 0x8c600000 0x0 0x4000>,
@@ -564,6 +565,16 @@
 			interrupt-names = "send-empty", "send-not-empty",
 					  "recv-empty", "recv-not-empty";
 			#mbox-cells = <0>;
+		};
+
+		/* ADT fpwm0: fpwm,s5l8920x, clock-gates 82 (ps_fpwm0) */
+		fpwm0: pwm@3a5040000 {
+			compatible = "apple,t8142-fpwm", "apple,s5l-fpwm";
+			reg = <0x3 0xa5040000 0x0 0x4000>;
+			power-domains = <&ps_fpwm0>;
+			clocks = <&clkref>;
+			#pwm-cells = <2>;
+			status = "disabled";
 		};
 
 		pinctrl_smc: pinctrl@38c820000 {

@@ -11,6 +11,7 @@
 /dts-v1/;
 
 #include "t8142.dtsi"
+#include <dt-bindings/leds/common.h>
 
 / {
 	compatible = "apple,j704", "apple,t8142", "apple,arm-platform";
@@ -46,6 +47,19 @@
 		#size-cells = <2>;
 		ranges;
 		/* To be filled by loader */
+	};
+
+	/* ADT fpwm0/kbd-backlight: default-hz 25000 */
+	led-controller {
+		compatible = "pwm-leds";
+		led-0 {
+			pwms = <&fpwm0 0 40000>;
+			label = "kbd_backlight";
+			function = LED_FUNCTION_KBD_BACKLIGHT;
+			color = <LED_COLOR_ID_WHITE>;
+			max-brightness = <255>;
+			default-state = "keep";
+		};
 	};
 };
 
@@ -106,6 +120,10 @@
 
 	mtp {
 	};
+};
+
+&fpwm0 {
+	status = "okay";
 };
 
 #include "hwmon-common.dtsi"
