@@ -470,7 +470,8 @@
 		 * (ascwrap-v6, IRQs 633-636, shared SRAM = iop-smc-nub region-base/size).
 		 * The PMU scratchpad offsets (info-rtc_scrpad 0x2100, info-pm_setting,
 		 * info-fault_shadow, info-scrpad_socd, info-leg_scrpad) match t6031.
-		 * Only the RTC is described so far.
+		 * The legacy scratchpad cells (boot_stage etc.) follow t6031 too
+		 * (info-leg_scrpad 0xf800); hwmon needs M5 sensor keys, not yet.
 		 */
 		nub_spmi: spmi@388714000 {
 			/* generation 4 (ADT gen = 4): not register compatible with t8103 */
@@ -491,6 +492,25 @@
 					rtc_offset: rtc-offset@2100 {
 						reg = <0x2100 0x6>;
 					};
+
+					boot_stage: boot-stage@f801 {
+						reg = <0xf801 0x1>;
+					};
+
+					boot_error_count: boot-error-count@f802,0 {
+						reg = <0xf802 0x1>;
+						bits = <0 4>;
+					};
+
+					panic_count: panic-count@f802,4 {
+						reg = <0xf802 0x1>;
+						bits = <4 4>;
+					};
+
+					shutdown_flag: shutdown-flag@f80f,3 {
+						reg = <0xf80f 0x1>;
+						bits = <3 1>;
+					};
 				};
 			};
 		};
@@ -501,6 +521,26 @@
 			      <0x3 0x8de00000 0x0 0x120000>;
 			reg-names = "smc", "sram";
 			mboxes = <&smc_mbox>;
+
+			smc_gpio: gpio@67500000 {
+				compatible = "apple,smc-gpio";
+				gpio-controller;
+				#gpio-cells = <2>;
+			};
+
+			smc_gpio_low: gpio@67700000 {
+				compatible = "apple,smc-low-gpio";
+				gpio-controller;
+				#gpio-cells = <2>;
+			};
+
+			smc_reboot: reboot {
+				compatible = "apple,smc-reboot";
+				nvmem-cells = <&shutdown_flag>, <&boot_stage>,
+					      <&boot_error_count>, <&panic_count>;
+				nvmem-cell-names = "shutdown_flag", "boot_stage",
+						   "boot_error_count", "panic_count";
+			};
 
 			rtc {
 				compatible = "apple,smc-rtc";
