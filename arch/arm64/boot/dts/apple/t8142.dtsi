@@ -471,7 +471,7 @@
 		 * The PMU scratchpad offsets (info-rtc_scrpad 0x2100, info-pm_setting,
 		 * info-fault_shadow, info-scrpad_socd, info-leg_scrpad) match t6031.
 		 * The legacy scratchpad cells (boot_stage etc.) follow t6031 too
-		 * (info-leg_scrpad 0xf800); hwmon needs M5 sensor keys, not yet.
+		 * (info-leg_scrpad 0xf800).
 		 */
 		nub_spmi: spmi@388714000 {
 			/* generation 4 (ADT gen = 4): not register compatible with t8103 */
@@ -532,6 +532,10 @@
 				compatible = "apple,smc-low-gpio";
 				gpio-controller;
 				#gpio-cells = <2>;
+			};
+
+			smc_hwmon: hwmon {
+				compatible = "apple,smc-hwmon";
 			};
 
 			smc_reboot: reboot {
