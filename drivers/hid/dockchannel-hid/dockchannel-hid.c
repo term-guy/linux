@@ -1317,15 +1317,20 @@ static int dchid_drain_ring(struct dockchannel_hid *dchid)
 	u32 producer, consumer, available;
 	int size, ret;
 
-	if (!READ_ONCE(dchid->ring_registered))
+	if (!READ_ONCE(dchid->ring_registered)) {
+		dev_err(dchid->dev, "m5dbg ring notify before the ring is registered\n");
 		return -EPROTO;
+	}
 
 	while (!READ_ONCE(dchid->stopping) && !READ_ONCE(dchid->failed)) {
 		producer = le32_to_cpu(READ_ONCE(indices[0]));
 		consumer = le32_to_cpu(READ_ONCE(indices[1]));
 		if (producer >= capacity || consumer != dchid->ring_read ||
-		    !IS_ALIGNED(producer, 4))
+		    !IS_ALIGNED(producer, 4)) {
+			dev_err(dchid->dev, "m5dbg ring indices: producer %u consumer %u read %u cap %u\n",
+				producer, consumer, dchid->ring_read, capacity);
 			return -EPROTO;
+		}
 		/* Read only the bytes published by this producer snapshot. */
 		dma_rmb();
 		available = producer >= consumer ? producer - consumer :
@@ -1398,6 +1403,13 @@ static void dchid_handle_packet(void *cookie, size_t avail)
 	return;
 failed:
 	dev_err(dchid->dev, "Receive transport failed: %d\n", ret);
+	/* M5 bring-up debug (#313): which frame, and the ring state */
+	dev_err(dchid->dev, "m5dbg rx fail: pkt %zu/%zu hdr %*ph ring reg=%d read=%u idx=%08x/%08x\n",
+		dchid->pkt_used, dchid->pkt_size,
+		(int)min_t(size_t, dchid->pkt_used, 16), dchid->pkt_buf,
+		READ_ONCE(dchid->ring_registered), dchid->ring_read,
+		dchid->ring ? le32_to_cpu(((__le32 *)dchid->ring)[0]) : 0,
+		dchid->ring ? le32_to_cpu(((__le32 *)dchid->ring)[1]) : 0);
 	dchid_fail(dchid, ret);
 }
 
