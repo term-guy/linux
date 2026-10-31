@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
+#include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/of_device.h>
 #include <linux/of_irq.h>
@@ -10,6 +11,37 @@
 
 #define tps_to_sn(tps) container_of_const((tps), struct sn201202x, cd.tps)
 
+#define SN201202X_POLLED_WAKE_SLEEP_MS	20
+
+/*
+ * Without the select interrupt (e.g. behind a generation 4 Apple SPMI
+ * controller, which is driven by polling), wait for register 0 to read back
+ * the selected register instead. reg | 0x80 means the selection is pending.
+ */
+static int regmap_sn201202x_select_reg_polled(struct spmi_device *sdev, u8 reg)
+{
+	unsigned long timeout = jiffies + msecs_to_jiffies(100);
+	int err;
+	u8 val;
+
+	err = spmi_register_zero_write(sdev, reg);
+	if (err)
+		return err;
+
+	do {
+		err = spmi_register_read(sdev, 0, &val);
+		if (err)
+			return err;
+		if (val == reg)
+			return 0;
+		if (val != (reg | 0x80))
+			return -EIO;
+		usleep_range(500, 1000);
+	} while (time_before(jiffies, timeout));
+
+	return -ETIMEDOUT;
+}
+
 static int regmap_sn201202x_select_reg(struct spmi_device *sdev, u8 reg)
 {
 	int err;
@@ -18,6 +50,9 @@ static int regmap_sn201202x_select_reg(struct spmi_device *sdev, u8 reg)
 	int attempts = 5;
 	struct tps6598x *tps = spmi_device_get_drvdata(sdev);
 	struct sn201202x *sn = tps_to_sn(tps);
+
+	if (sn->polled)
+		return regmap_sn201202x_select_reg_polled(sdev, reg);
 
 	reinit_completion(&sn->select_completion);
 	err = spmi_register_zero_write(sdev, reg);
@@ -157,6 +192,40 @@ static const struct of_device_id sn201202x_of_match[] = {
 	{}
 };
 
+static int sn201202x_wakeup(struct sn201202x *sn)
+{
+	int err;
+
+	reinit_completion(&sn->wake_completion);
+	err = spmi_command_wakeup(sn->sdev);
+	if (err)
+		return err;
+	if (sn->polled) {
+		msleep(SN201202X_POLLED_WAKE_SLEEP_MS);
+		return 0;
+	}
+	if (!wait_for_completion_timeout(&sn->wake_completion, msecs_to_jiffies(100)))
+		return -ETIMEDOUT;
+	return 0;
+}
+
+static int sn201202x_sleep(struct sn201202x *sn)
+{
+	int err;
+
+	reinit_completion(&sn->sleep_completion);
+	err = spmi_command_sleep(sn->sdev);
+	if (err)
+		return err;
+	if (sn->polled) {
+		msleep(SN201202X_POLLED_WAKE_SLEEP_MS);
+		return 0;
+	}
+	if (!wait_for_completion_timeout(&sn->sleep_completion, msecs_to_jiffies(100)))
+		return -ETIMEDOUT;
+	return 0;
+}
+
 static int sn201202x_probe(struct spmi_device *device)
 {
 	const struct of_device_id *match;
@@ -181,6 +250,20 @@ static int sn201202x_probe(struct spmi_device *device)
 	tps->dev = &device->dev;
 	tps->data = data;
 
+	init_completion(&sn->select_completion);
+	init_completion(&sn->sleep_completion);
+	init_completion(&sn->wake_completion);
+
+	/*
+	 * No interrupts in the devicetree: poll the select handshake, wait a
+	 * fixed time after wakeup/sleep and let the core poll for events.
+	 */
+	if (!of_property_present(device->dev.of_node, "interrupts")) {
+		sn->polled = true;
+		tps->irq = 0;
+		goto init_regmap;
+	}
+
 	tps->irq = of_irq_get_byname(device->dev.of_node, "irq");
 	if (tps->irq < 0)
 		return tps->irq;
@@ -193,10 +276,6 @@ static int sn201202x_probe(struct spmi_device *device)
 	irq_wake = of_irq_get_byname(device->dev.of_node, "wake");
 	if (irq_wake < 0)
 		return irq_wake;
-
-	init_completion(&sn->select_completion);
-	init_completion(&sn->sleep_completion);
-	init_completion(&sn->wake_completion);
 
 	ret = devm_request_irq(&device->dev, irq_select, sn201202x_irq,
 			       0, NULL, &sn->select_completion);
@@ -211,16 +290,15 @@ static int sn201202x_probe(struct spmi_device *device)
 	if (ret)
 		return ret;
 
+init_regmap:
 	spmi_device_set_drvdata(device, tps);
 	tps->regmap = devm_regmap_init_sn201202x(device, &tps6598x_regmap_config);
 	if (IS_ERR(tps->regmap))
 		return PTR_ERR(tps->regmap);
 
-	ret = spmi_command_wakeup(device);
+	ret = sn201202x_wakeup(sn);
 	if (ret)
 		return ret;
-	if (!wait_for_completion_timeout(&sn->wake_completion, msecs_to_jiffies(100)))
-		return -ETIMEDOUT;
 
 	ret = tipd_init(tps);
 	if (ret)
@@ -243,12 +321,9 @@ static int __maybe_unused sn201202x_resume(struct device *dev)
 	struct sn201202x *sn = tps_to_sn(tps);
 	int err;
 
-	reinit_completion(&sn->wake_completion);
-	err = spmi_command_wakeup(sn->sdev);
+	err = sn201202x_wakeup(sn);
 	if (err)
 		return err;
-	if (!wait_for_completion_timeout(&sn->wake_completion, msecs_to_jiffies(100)))
-		return -ETIMEDOUT;
 	return tipd_resume(tps);
 }
 
@@ -261,14 +336,9 @@ static int __maybe_unused sn201202x_suspend(struct device *dev)
 	err = tipd_suspend(tps);
 	if (err)
 		return err;
-	reinit_completion(&sn->sleep_completion);
-	err = spmi_command_sleep(sn->sdev);
+	err = sn201202x_sleep(sn);
 	if (err)
 		goto out_resume;
-	if (!wait_for_completion_timeout(&sn->sleep_completion, msecs_to_jiffies(100))) {
-		err = -ETIMEDOUT;
-		goto out_resume;
-	}
 	return 0;
 
 out_resume:
