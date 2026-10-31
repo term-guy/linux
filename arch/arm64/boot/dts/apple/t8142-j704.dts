@@ -129,5 +129,39 @@
 	status = "okay";
 };
 
+/*
+ * Left-side USB-C ports' SN201202x USB-PD controllers (ADT hpm0 left-front
+ * USID 0xc, hpm1 left-rear USID 0xa). No interrupts: the generation 4 SPMI
+ * controller is polled, and so is the PD controller. Not linked to the DWC3s
+ * or PHYs yet (status reporting only).
+ */
+&nub_spmi_a0 {
+	status = "okay";
+
+	hpm0: usb-pd@c {
+		compatible = "apple,sn201202x";
+		reg = <0xc SPMI_USID>;
+
+		typec0: connector {
+			compatible = "usb-c-connector";
+			label = "USB-C Left-front";
+			power-role = "dual";
+			data-role = "dual";
+		};
+	};
+
+	hpm1: usb-pd@a {
+		compatible = "apple,sn201202x";
+		reg = <0xa SPMI_USID>;
+
+		typec1: connector {
+			compatible = "usb-c-connector";
+			label = "USB-C Left-back";
+			power-role = "dual";
+			data-role = "dual";
+		};
+	};
+};
+
 #include "hwmon-common.dtsi"
 #include "hwmon-laptop.dtsi"

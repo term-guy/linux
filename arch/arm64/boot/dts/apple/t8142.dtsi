@@ -515,6 +515,14 @@
 			};
 		};
 
+		/* ADT nub-spmi-a0 (gen 4): USB-PD controllers hpm0/hpm1/hpm5 */
+		nub_spmi_a0: spmi@388908000 {
+			compatible = "apple,t8142-spmi";
+			reg = <0x3 0x88908000 0x0 0x4000>;
+			#address-cells = <2>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
 
 		smc: smc@38c600000 {
 			compatible = "apple,t8142-smc", "apple,smc";
