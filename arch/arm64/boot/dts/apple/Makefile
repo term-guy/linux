@@ -111,6 +111,7 @@ dtb-$(CONFIG_ARCH_APPLE) += t8122-j613.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8122-j615.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j704.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j704-usb-right.dtb
+dtb-$(CONFIG_ARCH_APPLE) += t8142-j704-usb-right-host0.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j704-usb-right-nolpm.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j704-usb-dual.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j704-usb-right-fs.dtb

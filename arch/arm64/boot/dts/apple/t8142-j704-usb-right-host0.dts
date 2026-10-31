@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Bring-up test variant: right-side port stays the USB2 gadget (host link),
+ * left-front port's DWC3 (dwc3_0, ADT usb-drd0 / port 1) is forced to host
+ * mode on the USB2 PHY state m1n1 leaves behind. No role switching yet.
+ */
+#include "t8142-j704-usb-right.dts"
+
+&dwc3_0 {
+	status = "okay";
+	dr_mode = "host";
+};
