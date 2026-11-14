@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * J704 first-boot TEST variant (bring-up only, not for upstream).
+ *
+ * Remote console: the right-hand USB-C port (ATC3, DWC3 0x41a280000, ADT
+ * usb-drd3) carries the cable to the host PC (verified on 2026-11-14 through
+ * the resting m1n1 proxy: drd3 DCFG address 1, high-speed link; drd0/drd1 no
+ * link). It runs as a plain USB2 device-mode "snps,dwc3" on the PHY state the
+ * loader (aura) leaves behind, as our older J704 kernel did (linux-asahi
+ * m5-t8142: t8142-j704-usb-right.dts, 0272ed1eaffc, 4717ed0c1bb5). The Apple
+ * glue (apple,t8142-dwc3) needs the ATC PHY and Type-C drivers, which are not
+ * built, so it is replaced here. A legacy built-in g_serial binds to this
+ * single UDC and gives ttyGS0 (console) with no userspace setup.
+ *
+ * Everything that is not needed for a GPU probe and could disturb the first
+ * boots is disabled: PCIe (Wi-Fi/BT/SD), NVMe, DCP/display pipeline, AVD,
+ * the other USB-C ports, their ATC PHYs and USB-PD controllers, and the
+ * MTP keyboard/trackpad coprocessor. Kept: CPUs, AIC, timer, pmgr, WDT,
+ * simple-framebuffer, PMC/CLPC, SMC, the GPU and its mailboxes.
+ */
+
+#include "t8142-j704.dts"
+
+/ {
+	model = "Apple MacBook Pro (14-inch, M5, 2025) [aurora test]";
+};
+
+/* --- Gadget controller: ATC3 / usb-drd3 / right-hand port --- */
+
+&dwc3_3 {
+	compatible = "snps,dwc3";
+	reg = <4 0x1a280000 0 0xcd00>;
+	/delete-property/ reg-names;
+	/delete-property/ usb-role-switch;
+	/delete-property/ role-switch-default-mode;
+	/delete-property/ resets;
+	/delete-property/ phys;
+	/delete-property/ phy-names;
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	snps,dis_u2_susphy_quirk;
+	snps,dis_u3_susphy_quirk;
+	/*
+	 * Bring-up properties read by the J704 hunks in drivers/usb/dwc3:
+	 * redo the USB2 PHY / pipehandler / DWC3 reset cycle before the core
+	 * init (old m5_usb2_release), and configure interrupt IN endpoints as
+	 * bulk in DEPCFG (old dwc3.m5_int_as_bulk=1; the first interrupt-IN
+	 * StartTransfer wedges all IN traffic on this core, so ACM needs it).
+	 */
+	apple,j704-usb2-reset-cycle;
+	apple,int-in-as-bulk;
+	status = "okay";
+	/delete-node/ ports;
+};
+
+/* No ATC PHY driver: the PHY node stays as a description only. */
+&atcphy3 {
+	status = "disabled";
+	/delete-node/ ports;
+};
+
+&typec3 {
+	/delete-node/ ports;
+};
+
+&nub_spmi_a1 {
+	status = "disabled";
+};
+
+/*
+ * atc3 domains stay on (as in the old tree: genpd's sync_state ignores
+ * pd_ignore_unused). The atcN_cio domains are not described in this tree, so
+ * the old "attaching atcN_cio_* sticks DWC3 CSFTRST" problem cannot occur.
+ */
+&ps_atc3_common {
+	apple,always-on;
+};
+
+&ps_atc3_usb_aon {
+	apple,always-on;
+};
+
+&ps_atc3_usb {
+	apple,always-on;
+};
+
+/* --- The other USB-C ports --- */
+
+&dwc3_0 {
+	status = "disabled";
+	/delete-node/ ports;
+};
+
+&dwc3_0_dart {
+	status = "disabled";
+};
+
+&dwc3_0_dart_1 {
+	status = "disabled";
+};
+
+&atcphy0 {
+	status = "disabled";
+	/delete-node/ ports;
+};
+
+&dwc3_1 {
+	status = "disabled";
+	/delete-node/ ports;
+};
+
+&dwc3_1_dart {
+	status = "disabled";
+};
+
+&dwc3_1_dart_1 {
+	status = "disabled";
+};
+
+&atcphy1 {
+	status = "disabled";
+	/delete-node/ ports;
+};
+
+&typec0 {
+	/delete-node/ ports;
+};
+
+&typec1 {
+	/delete-node/ ports;
+};
+
+&nub_spmi_a0 {
+	status = "disabled";
+};
+
+/* --- PCIe (Wi-Fi, Bluetooth, SD reader; also keeps aura's j813_n1 PCIe setup off) --- */
+
+&pcie0 {
+	status = "disabled";
+};
+
+&pcie0_msi {
+	status = "disabled";
+};
+
+&pcie0_dart {
+	status = "disabled";
+};
+
+&pcie2_dart {
+	status = "disabled";
+};
+
+/* --- NVMe --- */
+
+&nvme {
+	status = "disabled";
+};
+
+&sart {
+	status = "disabled";
+};
+
+&ans_mbox {
+	status = "disabled";
+};
+
+/* --- Display coprocessor (simple-framebuffer stays) --- */
+
+&display {
+	status = "disabled";
+};
+
+&dcp {
+	status = "disabled";
+};
+
+&dcp_mbox {
+	status = "disabled";
+};
+
+&dcp_dart {
+	status = "disabled";
+};
+
+&disp0_dart {
+	status = "disabled";
+};
+
+/* --- AVD --- */
+
+&avd {
+	status = "disabled";
+};
+
+&avd_dart {
+	status = "disabled";
+};
+
+/* --- MTP (keyboard/trackpad coprocessor) --- */
+
+&mtp {
+	status = "disabled";
+};
+
+&mtp_mbox {
+	status = "disabled";
+};
+
+&mtp_dockchannel {
+	status = "disabled";
+};
+
+&mtp_dart {
+	status = "disabled";
+};
