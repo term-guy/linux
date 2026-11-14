@@ -2496,6 +2496,96 @@ err_put_psy:
 }
 EXPORT_SYMBOL_GPL(dwc3_core_probe);
 
+/*
+ * J704 (Apple M5, T8142) bring-up, from our older J704 kernel (linux-asahi
+ * m5-t8142, drivers/usb/dwc3/m5-usb2-prep.c m5_usb2_release()). Without an
+ * ATC PHY driver, a plain "snps,dwc3" device-mode node runs on the USB2 PHY
+ * state the loader left behind. Redo the loader's USB2-only port bring-up as
+ * the ATC PHY driver's DWC3 reset control would, right before the core init:
+ * assert the DWC3 reset with the clamp, cycle the USB2 PHY into device mode,
+ * keep the PIPE interface on the dummy PHY, then release the DWC3 reset.
+ * Only for nodes with "apple,j704-usb2-reset-cycle" at a known T8142 DWC3
+ * address (the USB2 PHY and pipehandler sit at fixed offsets from it).
+ */
+#define J704_USB2PHY_USBCTL		0x00
+#define J704_USB2PHY_USBCTL_RUN		2
+#define J704_USB2PHY_USBCTL_ISOLATION	4
+#define J704_USB2PHY_CTL		0x04
+#define J704_USB2PHY_CTL_RESET		BIT(0)
+#define J704_USB2PHY_CTL_PORT_RESET	BIT(1)
+#define J704_USB2PHY_CTL_APB_RESET_N	BIT(2)
+#define J704_USB2PHY_CTL_SIDDQ		BIT(3)
+#define J704_USB2PHY_SIG		0x08
+#define J704_USB2PHY_SIG_DEVICE		0x01c1000f
+#define J704_USB2PHY_MISCTUNE		0x1c
+#define J704_USB2PHY_MISCTUNE_GATE_OFF	(BIT(29) | BIT(30))
+#define J704_PH_MUX_CTRL		0x0c
+#define J704_PH_MUX_CTRL_DUMMY		0x22
+#define J704_PH_AON_GEN			0x1c
+#define J704_PH_AON_GEN_DWC3_RESET_N	BIT(0)
+#define J704_PH_AON_GEN_FORCE_CLAMP_EN	BIT(4)
+#define J704_PH_NONSELECTED_OVERRIDE	0x20
+
+static void j704_rmw(void __iomem *reg, u32 clr, u32 set)
+{
+	writel((readl(reg) & ~clr) | set, reg);
+}
+
+static void dwc3_j704_usb2_reset_cycle(struct device *dev, const struct resource *res)
+{
+	static const resource_size_t drds[] = { 0x402280000, 0x40a280000, 0x41a280000 };
+	void __iomem *phy, *ph;
+	int i;
+
+	if (!of_property_read_bool(dev->of_node, "apple,j704-usb2-reset-cycle"))
+		return;
+	for (i = 0; i < ARRAY_SIZE(drds) && drds[i] != res->start; i++)
+		;
+	if (i == ARRAY_SIZE(drds)) {
+		dev_warn(dev, "j704: no USB2 PHY known at %pa\n", &res->start);
+		return;
+	}
+	phy = ioremap(res->start + 0x810000, 0x4000);
+	ph = ioremap(res->start + 0x804000, 0x4000);
+	if (!phy || !ph)
+		goto out;
+
+	j704_rmw(ph + J704_PH_AON_GEN, J704_PH_AON_GEN_DWC3_RESET_N,
+		 J704_PH_AON_GEN_FORCE_CLAMP_EN);
+	writel((readl(phy + J704_USB2PHY_USBCTL) & ~7) | J704_USB2PHY_USBCTL_ISOLATION,
+	       phy + J704_USB2PHY_USBCTL);
+	udelay(10);
+	j704_rmw(phy + J704_USB2PHY_CTL, 0, J704_USB2PHY_CTL_SIDDQ);
+	j704_rmw(phy + J704_USB2PHY_CTL, 0, J704_USB2PHY_CTL_PORT_RESET);
+	j704_rmw(phy + J704_USB2PHY_CTL, 0, J704_USB2PHY_CTL_RESET);
+	j704_rmw(phy + J704_USB2PHY_CTL, J704_USB2PHY_CTL_APB_RESET_N, 0);
+	j704_rmw(phy + J704_USB2PHY_MISCTUNE, 0, J704_USB2PHY_MISCTUNE_GATE_OFF);
+
+	writel(J704_USB2PHY_SIG_DEVICE, phy + J704_USB2PHY_SIG);
+	udelay(10);
+	j704_rmw(phy + J704_USB2PHY_CTL, J704_USB2PHY_CTL_SIDDQ, 0);
+	j704_rmw(phy + J704_USB2PHY_CTL, J704_USB2PHY_CTL_RESET, 0);
+	j704_rmw(phy + J704_USB2PHY_CTL, J704_USB2PHY_CTL_PORT_RESET, 0);
+	j704_rmw(phy + J704_USB2PHY_CTL, 0, J704_USB2PHY_CTL_APB_RESET_N);
+	j704_rmw(phy + J704_USB2PHY_MISCTUNE, J704_USB2PHY_MISCTUNE_GATE_OFF, 0);
+	writel(J704_USB2PHY_USBCTL_RUN, phy + J704_USB2PHY_USBCTL);
+
+	writel(J704_PH_MUX_CTRL_DUMMY, ph + J704_PH_MUX_CTRL);
+	writel(0x9332, ph + J704_PH_NONSELECTED_OVERRIDE);
+
+	j704_rmw(ph + J704_PH_AON_GEN, J704_PH_AON_GEN_FORCE_CLAMP_EN, 0);
+	j704_rmw(ph + J704_PH_AON_GEN, 0, J704_PH_AON_GEN_DWC3_RESET_N);
+	udelay(100);
+	dev_info(dev, "j704: USB2 device reset cycle done, aon_gen=%08x ctl=%08x usbctl=%08x\n",
+		 readl(ph + J704_PH_AON_GEN), readl(phy + J704_USB2PHY_CTL),
+		 readl(phy + J704_USB2PHY_USBCTL));
+out:
+	if (phy)
+		iounmap(phy);
+	if (ph)
+		iounmap(ph);
+}
+
 static int dwc3_probe(struct platform_device *pdev)
 {
 	struct dwc3_probe_data probe_data = {};
@@ -2507,6 +2597,8 @@ static int dwc3_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "missing memory resource\n");
 		return -ENODEV;
 	}
+
+	dwc3_j704_usb2_reset_cycle(&pdev->dev, res);
 
 	dwc = devm_kzalloc(&pdev->dev, sizeof(*dwc), GFP_KERNEL);
 	if (!dwc)

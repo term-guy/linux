@@ -18,6 +18,7 @@
 #include <linux/io.h>
 #include <linux/list.h>
 #include <linux/dma-mapping.h>
+#include <linux/of.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
@@ -587,13 +588,26 @@ static int dwc3_gadget_set_ep_config(struct dwc3_ep *dep, unsigned int action)
 	const struct usb_endpoint_descriptor *desc;
 	struct dwc3_gadget_ep_cmd_params params;
 	struct dwc3 *dwc = dep->dwc;
+	u8 type;
 
 	comp_desc = dep->endpoint.comp_desc;
 	desc = dep->endpoint.desc;
 
 	memset(&params, 0x00, sizeof(params));
 
-	params.param0 = DWC3_DEPCFG_EP_TYPE(usb_endpoint_type(desc))
+	/*
+	 * J704 (Apple M5) bring-up, from our older J704 kernel (dwc3.m5_int_as_bulk=1):
+	 * on this DWC_usb31 the first StartTransfer on an interrupt IN endpoint
+	 * stops all IN traffic, so an ACM notify endpoint wedges the console.
+	 * With "apple,int-in-as-bulk" the controller schedules interrupt IN
+	 * endpoints as bulk; the host still sees interrupt descriptors.
+	 */
+	type = usb_endpoint_type(desc);
+	if (dep->direction && type == USB_ENDPOINT_XFER_INT &&
+	    of_property_read_bool(dwc->dev->of_node, "apple,int-in-as-bulk"))
+		type = USB_ENDPOINT_XFER_BULK;
+
+	params.param0 = DWC3_DEPCFG_EP_TYPE(type)
 		| DWC3_DEPCFG_MAX_PACKET_SIZE(usb_endpoint_maxp(desc));
 
 	/* Burst size is only needed in SuperSpeed mode */
