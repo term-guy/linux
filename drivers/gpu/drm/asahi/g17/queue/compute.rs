@@ -2568,6 +2568,26 @@ impl Queue {
             compute::{ComputeArgs, ComputeDescriptor, COMPUTE_KICK_EVENT_MASK, COMPUTE_QOS_CLASS},
             kick::{KickArgs, KickQos},
         };
+        // Experiment (`m5_serialize_engines` bit 0): on the J813 forms a compute kick also
+        // waits for the last 3D kick published on any pair.
+        let mut serialized = [crate::g17::fw::kick::KickDependency::ZERO; crate::g17::fw::kick::KICK_BARRIERS_MAX];
+        let dependencies = if self.graph.m5
+            && crate::g17::J813_FORMS.load(Ordering::Relaxed)
+            && crate::module_parameters::m5_serialize_engines.value() & 1 != 0
+            && dependencies.len() < serialized.len()
+        {
+            serialized[..dependencies.len()].copy_from_slice(dependencies);
+            let mut count = dependencies.len();
+            if let Some(last) = crate::g17::fw::kick::KickDependency::from_word(
+                crate::g17::queue::render::J813_LAST_FRAGMENT.load(Ordering::Acquire),
+            ).filter(|d| d.word() != 0 && !dependencies.contains(d)) {
+                serialized[count] = last;
+                count += 1;
+            }
+            &serialized[..count]
+        } else {
+            dependencies
+        };
         let (epoch, addresses) = self.publication_preflight(&packet, host)?;
         let crate::g17::command::Validated::Compute {
             matrix_ops: requested_matrix_ops,
@@ -3066,6 +3086,11 @@ impl Queue {
             }
             self.terminal = self.quarantine(error, defer)?.map(|status| (status, error));
             return Err(error);
+        }
+        if self.graph.m5 {
+            if let Some(kick) = crate::g17::fw::kick::KickDependency::new(qid, kick_timestamp) {
+                crate::g17::queue::render::J813_LAST_COMPUTE.store(kick.word(), Ordering::Release);
+            }
         }
         Ok(())
     }

@@ -673,7 +673,9 @@ struct RenderBarriers {
 
 /// The last fragment kick published on any pair: on the J813 the next tiling kick waits for it
 /// (see [`Pair::publish`]).
-static J813_LAST_FRAGMENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(crate) static J813_LAST_FRAGMENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Experiment (`m5_serialize_engines`): the last compute kick published on any queue.
+pub(crate) static J813_LAST_COMPUTE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn render_barriers(
     fragment_stage: bool,
@@ -996,6 +998,24 @@ impl Pair {
                     barriers.tiling_types[barriers.tiling_count] = 2;
                     barriers.tiling_count += 1;
                     barriers.tiling_types[barriers.tiling_count] = 1;
+                }
+            }
+            let serialize = crate::module_parameters::m5_serialize_engines.value();
+            let compute = KickDependency::from_word(
+                J813_LAST_COMPUTE.load(core::sync::atomic::Ordering::Acquire),
+            )
+            .filter(|d| d.word() != 0);
+            if let Some(compute) = compute {
+                if serialize & 2 != 0 && barriers.tiling_count < barriers.tiling.len() {
+                    barriers.tiling[barriers.tiling_count] = compute;
+                    barriers.tiling_types[barriers.tiling_count] = 1;
+                    barriers.tiling_count += 1;
+                    barriers.tiling_types[barriers.tiling_count] = 1;
+                }
+                if serialize & 4 != 0 && barriers.fragment_count < barriers.fragment.len() - 1 {
+                    barriers.fragment[barriers.fragment_count] = compute;
+                    barriers.fragment_types[barriers.fragment_count] = 1;
+                    barriers.fragment_count += 1;
                 }
             }
         }

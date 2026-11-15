@@ -134,6 +134,10 @@ module! {
             default: 0x200,
             description: "M5 mesh rendering buffer bound to API task (object-stage) render kicks only, in 64 KiB chunks; 0 disables the binding and the task feature",
         },
+        m5_serialize_engines: u32 {
+            default: 0,
+            description: "M5 J813-forms experiment: bit 0 a compute kick waits for the last 3D kick, bit 1 a TA kick and bit 2 a 3D kick for the last compute kick",
+        },
         m5_probe_only: u32 {
             default: 0,
             description: "M5 (T8142) on 26A428: 1 logs the GPU ID registers and core masks and refuses the GPU before the UAT or the firmware are touched (bring-up); 0 starts the board's configuration",
