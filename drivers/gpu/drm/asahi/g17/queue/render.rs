@@ -182,6 +182,15 @@ struct Active {
     barrier_types: u64,
     /// Diagnostics: publication-time completion seeding and descriptor linkage.
     link_diag: Option<KBox<LinkDiag>>,
+    /// Diagnostics: CNTVCT (the GPU stamps' 24 MHz time base) when the kicks were published.
+    published_cnt: u64,
+}
+
+fn diag_cntvct() -> u64 {
+    let value: u64;
+    // SAFETY: Reading the virtual counter has no side effects.
+    unsafe { core::arch::asm!("isb", "mrs {v}, cntvct_el0", v = out(reg) value, options(nomem, nostack)) };
+    value
 }
 
 /// Diagnostics (GPU_J704_TIMEOUT.md round 2): what a render's publication told the firmware
@@ -336,6 +345,8 @@ static DIAG_3D_NEXT: AtomicU64 = AtomicU64::new(0);
 /// duration bucket; buckets <0, <8, <64, <512, <4096, <32768, more (24 MHz ticks).
 static DIAG_GAP_HIST: [[AtomicU64; 7]; 7] = [const { [const { AtomicU64::new(0) }; 7] }; 7];
 static DIAG_GAP_MISSING: AtomicU64 = AtomicU64::new(0);
+/// Diagnostics: retired renders by (TA start - publication) bucket and the gap bucket above.
+static DIAG_WAIT_HIST: [[AtomicU64; 7]; 7] = [const { [const { AtomicU64::new(0) }; 7] }; 7];
 
 fn diag_bucket(delta: i64) -> usize {
     match delta {
@@ -349,7 +360,7 @@ fn diag_bucket(delta: i64) -> usize {
     }
 }
 
-fn diag_note_retired(fragment_word: u64, ta_barrier: Option<u64>, timestamps: [u64; 4]) {
+fn diag_note_retired(fragment_word: u64, ta_barrier: Option<u64>, timestamps: [u64; 4], published: u64) {
     use core::sync::atomic::Ordering::Relaxed;
     let found = ta_barrier.and_then(|word| {
         DIAG_3D_ENDS.iter().find(|entry| entry[0].load(Relaxed) == word).map(|entry| entry[1].load(Relaxed))
@@ -359,6 +370,8 @@ fn diag_note_retired(fragment_word: u64, ta_barrier: Option<u64>, timestamps: [u
             let gap = diag_bucket(timestamps[0].wrapping_sub(end) as i64);
             let ta = diag_bucket(timestamps[1].wrapping_sub(timestamps[0]) as i64);
             DIAG_GAP_HIST[gap][ta].fetch_add(1, Relaxed);
+            let wait = diag_bucket(timestamps[0].wrapping_sub(published) as i64);
+            DIAG_WAIT_HIST[wait][gap].fetch_add(1, Relaxed);
         }
         _ => {
             DIAG_GAP_MISSING.fetch_add(1, Relaxed);
@@ -377,6 +390,10 @@ pub(crate) fn report_link_counters() {
                 gap, row.each_ref().map(|c| c.load(Relaxed)));
         }
         pr_warn!("G17: diag gap missing {}\n", DIAG_GAP_MISSING.load(Relaxed));
+        for (wait, row) in DIAG_WAIT_HIST.iter().enumerate() {
+            pr_warn!("G17: diag wait bucket {} (TA start - publication): gap buckets {:?}\n",
+                wait, row.each_ref().map(|c| c.load(Relaxed)));
+        }
     }
     use core::sync::atomic::Ordering::Relaxed;
     let prior = |s: usize| DIAG_PRIOR[s].each_ref().map(|c| c.load(Relaxed));
@@ -1466,6 +1483,7 @@ impl Pair {
                 barrier_words: diag_words,
                 barrier_counts: diag_counts,
                 link_diag,
+                published_cnt: diag_cntvct(),
                 barrier_types: diag_types,
             })
             .map_err(|_| EBUSY)?;
@@ -1827,9 +1845,10 @@ impl Pair {
             let end = word.and_then(|word| DIAG_3D_ENDS.iter()
                 .find(|entry| entry[0].load(Relaxed) == word).map(|entry| entry[1].load(Relaxed)));
             let ts = self.memory.stage_timestamps(front.ticket.ordinal).unwrap_or([0; 4]);
-            pr_warn!("G17: diag blamed TA start {:#x} waited 3D {:x?} ended {:x?}: gap {:?} ticks, TA {} ticks\n",
+            pr_warn!("G17: diag blamed TA start {:#x} waited 3D {:x?} ended {:x?}: gap {:?} ticks, TA {} ticks, published {:#x} ({} ticks before the TA start); cntvct now {:#x}\n",
                 ts[0], word, end, end.map(|end| ts[0].wrapping_sub(end) as i64),
-                ts[1].wrapping_sub(ts[0]) as i64);
+                ts[1].wrapping_sub(ts[0]) as i64, front.published_cnt,
+                ts[0].wrapping_sub(front.published_cnt) as i64, diag_cntvct());
         }
         let mut seen = [u32::MAX; 2];
         for active in self.active.iter() {
@@ -2461,6 +2480,7 @@ impl Pair {
             (u64::from(qids[1]) << 40) | front.kicks[1].get(),
             (front.barrier_counts[0] > 0).then_some(front.barrier_words[0]),
             timestamps,
+            front.published_cnt,
         );
         {
             let entry = (
