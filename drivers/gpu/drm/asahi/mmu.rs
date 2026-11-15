@@ -3893,11 +3893,23 @@ impl Uat {
                 Some((id, true)) => id,
                 Some((id, false)) => {
                     inner.context_fence_overruns += 1;
+                    if inner.context_fence_overruns <= 8 {
+                        pr_warn!("MMU: execution context {} reused before its fence {} (witnessed {}; {} in use)\n",
+                            id, fences[id], witnessed,
+                            (inner.execution_contexts & EXECUTION_CONTEXT_MASK).count_ones());
+                    }
                     id
                 }
                 None => return Err(ENOSPC),
             };
             inner.execution_contexts |= 1u64 << id;
+            {
+                static HIGH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let used = (inner.execution_contexts & EXECUTION_CONTEXT_MASK).count_ones();
+                if used >= 16 && used > HIGH.fetch_max(used, Ordering::Relaxed) {
+                    pr_info!("MMU: {} execution contexts in use (new high)\n", used);
+                }
+            }
             // On M5 a slot's reuse generation is never zero, which M5's context token reserves
             // for none: it wraps from 255 to 1. Slots reused past 255 times (reclaimed M5 queues)
             // would otherwise hand out zero.

@@ -66,10 +66,17 @@ impl QosIds {
             let mut state = self.state.lock();
             let used = state.used;
             let free = (0..QOS_IDS).filter(|&id| used & (1u128 << id) == 0);
-            let Some((id, _)) = mmu::pick_returned(free, &state.returns, &state.fences, witnessed)
+            let Some((id, fenced)) = mmu::pick_returned(free, &state.returns, &state.fences, witnessed)
             else {
                 return Err(super::capacity::refused(super::capacity::Site::QosIds));
             };
+            if !fenced {
+                static REPORTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                if REPORTED.fetch_add(1, Ordering::Relaxed) < 8 {
+                    pr_warn!("G17: QoS ID {} reused before its fence {} (witnessed {})\n",
+                        id, state.fences[id], witnessed);
+                }
+            }
             state.used |= 1u128 << id;
             // A new owner writes its own scheduler row at its first publication.
             state.released &= !(1u128 << id);
