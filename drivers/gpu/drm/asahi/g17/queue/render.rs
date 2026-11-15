@@ -329,7 +329,55 @@ fn link_diag(
     
 }
 
+/// Diagnostics: 3D end timestamps of recently retired renders, keyed by their 3D kick word.
+static DIAG_3D_ENDS: [[AtomicU64; 2]; 64] = [const { [AtomicU64::new(0), AtomicU64::new(0)] }; 64];
+static DIAG_3D_NEXT: AtomicU64 = AtomicU64::new(0);
+/// Diagnostics: retired renders by (TA start - end of the 3D its TA waited on) bucket and TA
+/// duration bucket; buckets <0, <8, <64, <512, <4096, <32768, more (24 MHz ticks).
+static DIAG_GAP_HIST: [[AtomicU64; 7]; 7] = [const { [const { AtomicU64::new(0) }; 7] }; 7];
+static DIAG_GAP_MISSING: AtomicU64 = AtomicU64::new(0);
+
+fn diag_bucket(delta: i64) -> usize {
+    match delta {
+        i64::MIN..0 => 0,
+        0..8 => 1,
+        8..64 => 2,
+        64..512 => 3,
+        512..4096 => 4,
+        4096..32768 => 5,
+        _ => 6,
+    }
+}
+
+fn diag_note_retired(fragment_word: u64, ta_barrier: Option<u64>, timestamps: [u64; 4]) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let found = ta_barrier.and_then(|word| {
+        DIAG_3D_ENDS.iter().find(|entry| entry[0].load(Relaxed) == word).map(|entry| entry[1].load(Relaxed))
+    });
+    match found {
+        Some(end) if timestamps[0] != 0 && timestamps[1] != 0 => {
+            let gap = diag_bucket(timestamps[0].wrapping_sub(end) as i64);
+            let ta = diag_bucket(timestamps[1].wrapping_sub(timestamps[0]) as i64);
+            DIAG_GAP_HIST[gap][ta].fetch_add(1, Relaxed);
+        }
+        _ => {
+            DIAG_GAP_MISSING.fetch_add(1, Relaxed);
+        }
+    }
+    let index = (DIAG_3D_NEXT.fetch_add(1, Relaxed) % 64) as usize;
+    DIAG_3D_ENDS[index][1].store(timestamps[3], Relaxed);
+    DIAG_3D_ENDS[index][0].store(fragment_word, Relaxed);
+}
+
 pub(crate) fn report_link_counters() {
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        for (gap, row) in DIAG_GAP_HIST.iter().enumerate() {
+            pr_warn!("G17: diag gap bucket {} (TA start - waited 3D end): TA duration buckets {:?}\n",
+                gap, row.each_ref().map(|c| c.load(Relaxed)));
+        }
+        pr_warn!("G17: diag gap missing {}\n", DIAG_GAP_MISSING.load(Relaxed));
+    }
     use core::sync::atomic::Ordering::Relaxed;
     let prior = |s: usize| DIAG_PRIOR[s].each_ref().map(|c| c.load(Relaxed));
     pr_warn!("G17: diag counters published={} identity_updates={} prior ta[seeded,held_eq,held_ne,unknown]={:?} 3d={:?} link_bad={} ctx_stale={} forced_seeds={} node_reinit={} node_linked={} node_undrained={} node_rearm={} node_rearm_linked={} node_mixed={} settle_waits={} render_adds={} render_rearm={}\n",
@@ -1773,6 +1821,16 @@ impl Pair {
     /// in flight (at most two distinct contexts).
     pub(crate) fn report_recovery_work(&self) {
         report_link_counters();
+        if let Some(front) = self.active.front() {
+            use core::sync::atomic::Ordering::Relaxed;
+            let word = (front.barrier_counts[0] > 0).then_some(front.barrier_words[0]);
+            let end = word.and_then(|word| DIAG_3D_ENDS.iter()
+                .find(|entry| entry[0].load(Relaxed) == word).map(|entry| entry[1].load(Relaxed)));
+            let ts = self.memory.stage_timestamps(front.ticket.ordinal).unwrap_or([0; 4]);
+            pr_warn!("G17: diag blamed TA start {:#x} waited 3D {:x?} ended {:x?}: gap {:?} ticks, TA {} ticks\n",
+                ts[0], word, end, end.map(|end| ts[0].wrapping_sub(end) as i64),
+                ts[1].wrapping_sub(ts[0]) as i64);
+        }
         let mut seen = [u32::MAX; 2];
         for active in self.active.iter() {
             let id = active.packet.context.id();
@@ -2399,6 +2457,11 @@ impl Pair {
         };
         let ordinal = front.ticket.ordinal;
         let context_update = front.context_update;
+        diag_note_retired(
+            (u64::from(qids[1]) << 40) | front.kicks[1].get(),
+            (front.barrier_counts[0] > 0).then_some(front.barrier_words[0]),
+            timestamps,
+        );
         {
             let entry = (
                 [front.kicks[0].get(), front.kicks[1].get()],
