@@ -301,7 +301,9 @@ fn link_diag(
         }
         
         if m5 {
-            DIAG_PUBLISHED.fetch_add(1, Relaxed);
+            if (DIAG_PUBLISHED.fetch_add(1, Relaxed) + 1) % 16384 == 0 {
+                report_link_counters();
+            }
             if identity_update {
                 DIAG_IDENTITY_UPDATES.fetch_add(1, Relaxed);
             }
