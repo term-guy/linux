@@ -1083,10 +1083,18 @@ impl Firmware {
         // The M5 firmware powers the cores for work by its own policy, and under a host
         // hold J775D's core-power witness reads unpowered until the hold is released. M5
         // takes no host hold, whatever delay the tree or sysfs asks for.
-        if self.init.is_m5() {
+        // Experiment (`m5_idle_hold_ms`, off by default): take the host hold on M5 anyway, so
+        // that the firmware keeps the cores powered while work arrives (GPU_J704_TIMEOUT.md
+        // round 2: the restarts hit TAs that started after the GPU had idled).
+        let m5_hold = crate::module_parameters::m5_idle_hold_ms.value();
+        if self.init.is_m5() && m5_hold == 0 {
             return None;
         }
-        let hold_ms = power::IDLE_HOLD_MS.load(Ordering::Relaxed);
+        let hold_ms = if self.init.is_m5() {
+            m5_hold.max(power::FIRMWARE_IDLE_OFF_MS + 1)
+        } else {
+            power::IDLE_HOLD_MS.load(Ordering::Relaxed)
+        };
         for _ in 0..2 {
             match self
                 .hold
@@ -1097,6 +1105,13 @@ impl Firmware {
                 power::HoldAction::Assert => {
                     if self.set_idle_control(false).is_err() {
                         return None;
+                    }
+                    if self.init.is_m5() {
+                        static ASSERTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                        let n = ASSERTS.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n <= 4 || n.is_power_of_two() {
+                            pr_info!("G17: M5 idle hold asserted (keep powered), {} times\n", n);
+                        }
                     }
                     self.hold.asserted();
                 }
