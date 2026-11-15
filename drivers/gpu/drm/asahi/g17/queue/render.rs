@@ -1042,16 +1042,14 @@ impl Pair {
         fragment_types[barriers.fragment_count + 1] = 1;
         let fragment_typed = barriers.fragment_count + 1 + usize::from(ancestor.is_some());
         let mut tiling_types = barriers.tiling_types;
-        // On the J813 forms (T8142) every dependency of every TA and 3D kick takes the
-        // completion class, as in macOS 27.0's own kick queues (see
-        // `fw::m5::compute::explicit_dependency`). The pipelined classes let a TA wait only
-        // for the last 3D kick to be taken up rather than to finish: with more than four
-        // clients a TA then started right as another context's 3D did, and the firmware
-        // restarted the GPU at the end of that render's TA (or the 3D faulted in the TA's VM),
-        // blaming the 3D queue.
-        if m5 && j813 {
-            tiling_types[..barriers.tiling_count + 1].fill(crate::g17::fw::m5::compute::COMPLETION_DEPENDENCY);
-            fragment_types[..fragment_typed].fill(crate::g17::fw::m5::compute::COMPLETION_DEPENDENCY);
+        // Experiment (`m5_render_dep_class`, off by default): give every TA and 3D kick
+        // dependency one completion class. macOS 27.0 uses class 1 on the J813
+        // (`fw::m5::compute::explicit_dependency`); on the J704 class 1 everywhere did not
+        // remove the firmware restarts at a render's TA end (GPU_J704_TIMEOUT.md, #853-#858).
+        let forced = crate::module_parameters::m5_render_dep_class.value();
+        if m5 && j813 && (1..=3).contains(&forced) {
+            tiling_types[..barriers.tiling_count + 1].fill(forced as u8);
+            fragment_types[..fragment_typed].fill(forced as u8);
         }
         let mut diag_types = 0u64;
         for (index, kind) in Iterator::chain(tiling_types[..barriers.tiling_count + 1].iter(),
