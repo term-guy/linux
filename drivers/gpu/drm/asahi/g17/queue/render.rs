@@ -1165,7 +1165,9 @@ impl Pair {
             let last = KickDependency::from_word(
                 J813_LAST_FRAGMENT.load(core::sync::atomic::Ordering::Acquire),
             )
-            .filter(|d| d.word() != 0 && d.qid() != qids[0]);
+            .filter(|d| d.word() != 0 && d.qid() != qids[0])
+            // Experiment (`m5_no_last_fragment`): leave out the TA's wait on the last 3D kick.
+            .filter(|_| crate::module_parameters::m5_no_last_fragment.value() != 1);
             if let Some(last) = last {
                 if barriers.tiling_count < barriers.tiling.len() {
                     barriers.tiling[barriers.tiling_count] = last;

@@ -154,6 +154,10 @@ module! {
             default: 0,
             description: "G17 experiment: 1 gives every command after the first of a submission its own work-state node",
         },
+        m5_no_last_fragment: u32 {
+            default: 0,
+            description: "M5 J813-forms experiment: 1 leaves out every TA kick's wait on the last 3D kick published on another pair",
+        },
         m5_pool_scale: u32 {
             default: 1,
             description: "M5 experiment: provision this many times the computed private-memory pool blocks (1: as computed)",
