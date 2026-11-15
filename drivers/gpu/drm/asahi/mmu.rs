@@ -1285,6 +1285,40 @@ impl ExecutionContext {
     }
 }
 
+/// Diagnostics (GPU_J704_TIMEOUT.md round 2): the UAT whose execution contexts
+/// [`diag_report_context`] describes. Set at the first execution context; the UAT lives
+/// as long as the device.
+static DIAG_UAT: core::sync::atomic::AtomicPtr<UatInner> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Diagnostics: the TTBAT words and allocator state of context `id`.
+pub(crate) fn diag_report_context(id: usize, expected: Option<(u64, u64)>) {
+    let pointer = DIAG_UAT.load(Ordering::Acquire);
+    if pointer.is_null() || id >= UAT_NUM_CTX {
+        return;
+    }
+    // SAFETY: set from a live UAT that is never freed while the device exists.
+    let inner = unsafe { &*pointer };
+    let Some(shared) = inner.shared.try_lock() else {
+        pr_warn!("MMU: diag context {}: UAT busy\n", id);
+        return;
+    };
+    let roots = &shared.ttbs()[id];
+    let in_use = (shared.execution_contexts >> id) & 1 != 0;
+    pr_warn!("MMU: diag context {}: ttb0 {:#x} ttb1 {:#x} expected {:x?} in_use {} holds {} fence {} returned {} clock {} generation {} overruns {}\n",
+        id, roots.ttb0.load(Ordering::Acquire), roots.ttb1.load(Ordering::Acquire), expected,
+        in_use, shared.context_holds[id],
+        shared.context_fences[id], shared.context_returns[id], shared.context_clock,
+        shared.context_generations[id], shared.context_fence_overruns);
+}
+
+impl ExecutionContext {
+    /// Diagnostics: the TTBAT words this context published.
+    pub(crate) fn diag_roots(&self) -> (u64, u64) {
+        (self.root.low, self.root.high)
+    }
+}
+
 impl ExecutionRoot {
     fn release(&self) {
         if self.released.swap(true, Ordering::AcqRel) {
@@ -3903,6 +3937,7 @@ impl Uat {
                 None => return Err(ENOSPC),
             };
             inner.execution_contexts |= 1u64 << id;
+            DIAG_UAT.store(Arc::as_ptr(&self.inner).cast_mut(), Ordering::Release);
             {
                 static HIGH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                 let used = (inner.execution_contexts & EXECUTION_CONTEXT_MASK).count_ones();

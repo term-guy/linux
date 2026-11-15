@@ -15,6 +15,7 @@ impl Registry {
             if let Some(pair) = &entry.pair {
                 let qids = pair.qids();
                 pair.report_recovery((|| Ok([port.stamp(qids[0])?, port.stamp(qids[1])?]))());
+                pair.report_recovery_work();
             } else {
                 pr_warn!("G17: recovery render queue={} unavailable borrowed={} constructing={}\n",
                     qid, entry.borrowed_active, entry.constructing);

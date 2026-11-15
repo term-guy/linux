@@ -142,6 +142,10 @@ module! {
             default: 0,
             description: "G17 experiment: at most this many commands of a queue in flight, all through the scheduler (0: the queue depth, with inline publication)",
         },
+        m5_reseed: u32 {
+            default: 0,
+            description: "M5 experiment: 1 seeds both queues' predecessor completion on every covered render publication (0: only at install or a context update)",
+        },
         m5_pool_scale: u32 {
             default: 1,
             description: "M5 experiment: provision this many times the computed private-memory pool blocks (1: as computed)",

@@ -24,6 +24,29 @@ fn commands(storage: &mut [u8]) -> Result<(
         (&mut fragment[..cmd::M5_3D_COMMAND_BYTES]).try_into().map_err(|_| EINVAL)?))
 }
 
+/// Diagnostics: the TA and 3D completion and linkage words of an assembled render, in the
+/// order of [`LINK_WORD_NAMES`]. Unaligned little-endian reads of the command storage.
+pub(crate) const LINK_WORD_NAMES: [&str; 18] = [
+    "ta79c_l3d_qid", "ta7a0_l3d_stamp", "ta7a4_busy", "ta7a8_l3d_compl", "ta7b0_pass",
+    "ta8b6_stamp", "ta8ba_qid", "ta8be_slot", "ta8c2_wait", "ta8c6_compl", "ta8ce_key",
+    "ta94d_token", "f090_pass", "f2150_stamp", "f2154_qid", "f2158_slot", "f2160_compl",
+    "f21e7_token",
+];
+pub(crate) fn link_words(storage: &[u8]) -> [u64; 18] {
+    let get = |at: usize, n: usize| -> u64 {
+        storage.get(at..at + n).map_or(u64::MAX, |b| {
+            b.iter().rev().fold(0u64, |v, x| v << 8 | u64::from(*x))
+        })
+    };
+    let f = FRAGMENT_OFFSET;
+    [
+        get(0x79c, 4), get(0x7a0, 4), get(0x7a4, 4), get(0x7a8, 8), get(0x7b0, 2),
+        get(0x8b6, 4), get(0x8ba, 4), get(0x8be, 4), get(0x8c2, 4), get(0x8c6, 8), get(0x8ce, 8),
+        get(0x94d, 8), get(f + 0x90, 1), get(f + 0x2150, 4), get(f + 0x2154, 4),
+        get(f + 0x2158, 4), get(f + 0x2160, 8), get(f + 0x21e7, 8),
+    ]
+}
+
 pub(crate) fn link_completions(storage: &mut [u8],
     kicks: [super::super::kick::KickTimestamp; 2], pass: u8, fragment_busy: bool) -> Result {
     let (ta, fragment) = commands(storage)?;

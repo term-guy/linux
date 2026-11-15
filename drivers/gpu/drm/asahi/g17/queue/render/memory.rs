@@ -237,6 +237,14 @@ impl Graph {
         Ok(self.aliases[stage].as_ref().ok_or(EIO)?.client.iova()
             + (ordinal as usize % RECORDS * stride) as u64)
     }
+    /// Diagnostics: read-only view of `ordinal`'s M5 command storage.
+    pub(super) fn m5_storage_ref(&self, ordinal: u64) -> Result<&[u8]> {
+        if !self.m5 || !self.owns(ordinal) { return Err(EINVAL); }
+        let start = self.offset(0, ordinal);
+        self.descriptors.bytes()
+            .get(start..start + fw::m5::render_assembly::COMMAND_STORAGE_BYTES)
+            .ok_or(EINVAL)
+    }
     /// The command storage of `ordinal` on M5: both stages' commands.
     pub(super) fn m5_storage(&mut self, ordinal: u64) -> Result<&mut [u8]> {
         if !self.m5 || !self.owns(ordinal) { return Err(EINVAL); }

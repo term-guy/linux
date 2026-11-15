@@ -123,11 +123,99 @@ struct WorkStorage {
     counts: [u32; STATE_COUNT],
     render: RenderSlots,
 }
+/// Diagnostics (GPU_J704_TIMEOUT.md round 2): work-node reinitialization checks.
+pub(crate) static DIAG_NODE_REINIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(crate) static DIAG_NODE_LINKED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(crate) static DIAG_NODE_UNDRAINED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 impl WorkStorage {
+    /// Diagnostics: a little-endian u64 at a 4-byte aligned offset of the work object.
+    fn diag_u64(&self, offset: usize) -> Option<u64> {
+        let low = self.object.word(offset).ok()?.load(Ordering::Relaxed);
+        let high = self.object.word(offset + 4).ok()?.load(Ordering::Relaxed);
+        Some(u64::from(low) | u64::from(high) << 32)
+    }
+    /// Diagnostics: offsets (head: 0x1000 + n, node s: s * 0x100 + n) of every word of the list
+    /// head and of the other initialized nodes that points into node `slot`.
+    fn diag_references(&self, slot: usize) -> ([u32; 4], usize) {
+        let base = self.object.gpu_va() + (slot * NODE_STRIDE) as u64;
+        let range = base..base + NODE_STRIDE as u64;
+        let mut found = [0u32; 4];
+        let mut count = 0usize;
+        let check = |offset: usize, found: &mut [u32; 4], count: &mut usize| {
+            if self.diag_u64(offset).is_some_and(|value| range.contains(&value)) {
+                if *count < found.len() {
+                    found[*count] = offset as u32;
+                }
+                *count += 1;
+            }
+        };
+        for n in (0..0x18).step_by(4) {
+            check(UAT_PGSZ + 0x400 + n, &mut found, &mut count);
+        }
+        for other in 0..STATE_COUNT {
+            if other == slot || self.words[other].is_none() {
+                continue;
+            }
+            for n in (0..NODE_STRIDE - 4).step_by(4) {
+                check(other * NODE_STRIDE + n, &mut found, &mut count);
+            }
+        }
+        (found, count)
+    }
+    /// Diagnostics: the list head and the pointer-like words of every initialized node.
+    pub(crate) fn diag_dump(&self, context: u32) {
+        let lo = self.object.gpu_va();
+        let hi = lo + 2 * UAT_PGSZ as u64;
+        pr_warn!("G17: recovery work list ctx {} base {:#x} head [{:#x?}, {:#x?}, {:#x?}]\n", context, lo,
+            self.diag_u64(UAT_PGSZ + 0x400), self.diag_u64(UAT_PGSZ + 0x408),
+            self.diag_u64(UAT_PGSZ + 0x410));
+        for slot in 0..STATE_COUNT {
+            let Some(word) = self.words[slot] else { continue };
+            let completed = self.object.word(slot * NODE_STRIDE + 0xc).map_or(u32::MAX, |w| w.load(Ordering::Relaxed));
+            let mut links = [(0u16, 0u64); 6];
+            let mut n = 0;
+            for off in (0x14..NODE_STRIDE - 4).step_by(4) {
+                if let Some(value) = self.diag_u64(slot * NODE_STRIDE + off) {
+                    if (lo..hi).contains(&value) && n < links.len() {
+                        links[n] = (off as u16, value);
+                        n += 1;
+                    }
+                }
+            }
+            pr_warn!("G17: recovery work node ctx {} slot {} word {:#x} count {} completed {} links {:x?}\n",
+                context, slot, word, self.counts[slot], completed, &links[..n]);
+        }
+    }
     fn initialize(&mut self, word: u32) -> Result {
         let slot = (word & 63) as usize;
         if slot >= STATE_COUNT {
             return Err(EINVAL);
+        }
+        if let Some(old) = self.words[slot] {
+            use core::sync::atomic::Ordering::Relaxed;
+            DIAG_NODE_REINIT.fetch_add(1, Relaxed);
+            let completed = self.object.word(slot * NODE_STRIDE + 0xc)
+                .map_or(u32::MAX, |w| w.load(Ordering::Relaxed));
+            fence(Ordering::Acquire);
+            if completed < self.counts[slot] {
+                let n = DIAG_NODE_UNDRAINED.fetch_add(1, Relaxed) + 1;
+                if n <= 8 || n.is_power_of_two() {
+                    pr_warn!("G17: diag work node slot {} (old word {:#x}, new {:#x}) reinitialized with completed {} < counted {} ({} so far)\n",
+                        slot, old, word, completed, self.counts[slot], n);
+                }
+            }
+            let (found, count) = self.diag_references(slot);
+            if count != 0 {
+                let n = DIAG_NODE_LINKED.fetch_add(1, Relaxed) + 1;
+                if n <= 8 || n.is_power_of_two() {
+                    pr_warn!("G17: diag work node slot {} (old word {:#x}, new {:#x}) still referenced by {} words at {:#x?} (work base {:#x}; {} so far)\n",
+                        slot, old, word, count, &found[..count.min(4)], self.object.gpu_va(), n);
+                    if n <= 2 {
+                        self.diag_dump(u32::MAX);
+                    }
+                }
+            }
         }
         let counter = UAT_PGSZ + slot * 4;
         let node = fw::WorkNode::new(self.object.gpu_va() + counter as u64, word).ok_or(EINVAL)?;
@@ -463,6 +551,15 @@ impl Context {
     pub(crate) fn firmware_may_link(&self) -> bool {
         let killed = super::queue::compute::exit::State::read(self).map_or(0, |state| state.killed);
         must_retain(self.work_head().ok(), self.work_head_va(), killed)
+    }
+
+    /// Diagnostics: dump this context's work list head and nodes and its TTBAT entry.
+    pub(crate) fn diag_dump_work(&self) {
+        match self.work.try_lock() {
+            Some(work) => work.diag_dump(self.id()),
+            None => pr_warn!("G17: recovery work list ctx {} busy\n", self.id()),
+        }
+        mmu::diag_report_context(self.id() as usize, Some(self.execution.diag_roots()));
     }
 
     pub(crate) fn work_head_va(&self) -> u64 {

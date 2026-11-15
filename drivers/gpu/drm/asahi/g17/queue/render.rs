@@ -34,6 +34,7 @@ use crate::g17::{
 };
 use crate::{hw::t8140::queues, mmu};
 pub(crate) use dependencies::Dependencies;
+use core::sync::atomic::AtomicU64;
 use kernel::{prelude::*, sync::Arc};
 use retirement::{Ticket, Tracker};
 
@@ -179,6 +180,164 @@ struct Active {
     barrier_counts: [u8; 2],
     /// Diagnostics: two-bit classes, tiling (with parent) then fragment (with parent/ancestor).
     barrier_types: u64,
+    /// Diagnostics: publication-time completion seeding and descriptor linkage.
+    link_diag: Option<KBox<LinkDiag>>,
+}
+
+/// Diagnostics (GPU_J704_TIMEOUT.md round 2): what a render's publication told the firmware
+/// about the physical queues' predecessor completions, and the linkage words it wrote.
+#[derive(Clone, Copy, Debug)]
+struct LinkDiag {
+    payload: u8,
+    /// Per stage: (seed valid, seed value) of the configuration published with the kick.
+    seeds: [(u32, u64); 2],
+    covered: [bool; 2],
+    installed: [bool; 2],
+    context_update: bool,
+    identity_update: bool,
+    /// Completion values of this pair's previous publication in this recovery epoch.
+    held: Option<[u64; 2]>,
+    /// What each queue must hold before this kick: `kick.prev()` with pass `payload - 1`.
+    expected: [u64; 2],
+    /// Per stage: 0 seeded, 1 held value equal, 2 held value differs, 3 unknown (no seed, no held).
+    prior: [u8; 2],
+    ctx: u32,
+    ctx_generation: u8,
+    ctx_current: bool,
+    work_slot: u32,
+    link_bad: u32,
+    words: [u64; 18],
+}
+
+/// Diagnostics counters (round 2), printed at every recovery.
+pub(crate) static DIAG_PUBLISHED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DIAG_IDENTITY_UPDATES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DIAG_PRIOR: [[AtomicU64; 4]; 2] = [
+    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+];
+pub(crate) static DIAG_LINK_BAD: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DIAG_CTX_STALE: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DIAG_FORCED_SEEDS: AtomicU64 = AtomicU64::new(0);
+
+fn diag_rate(counter: &AtomicU64) -> bool {
+    let n = counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    n <= 8 || n.is_power_of_two()
+}
+
+/// Diagnostics: builds a render's [`LinkDiag`] and counts its anomalies. Out of line and
+/// boxed to keep `Pair::publish`'s stack frame small.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn link_diag(
+    m5: bool,
+    ordinal: u64,
+    qids: [u8; 2],
+    kicks: [KickTimestamp; 2],
+    payload: u8,
+    work_slot: u32,
+    configs: [crate::g17::fw::queue::QueueConfig; 2],
+    held: Option<[u64; 2]>,
+    covered: [bool; 2],
+    installed: [bool; 2],
+    context_update: bool,
+    identity_update: bool,
+    context_id: u32,
+    ctx_generation: u8,
+    ctx_current: bool,
+    storage: Option<&[u8]>,
+) -> Option<KBox<LinkDiag>> {
+            use core::sync::atomic::Ordering::Relaxed;
+        let expected = [0, 1].map(|stage| kicks[stage].prev().completion_value(payload.wrapping_sub(1)));
+        let seeds = [0, 1].map(|stage| {
+            let config = configs[stage];
+            (config.completion_seed_valid, config.completion_seed)
+        });
+        let prior = [0, 1].map(|stage| {
+            if seeds[stage].0 != 0 {
+                0u8
+            } else {
+                match held {
+                    Some(held) if held[stage] == expected[stage] => 1,
+                    Some(_) => 2,
+                    None => 3,
+                }
+            }
+        });
+        let words = match storage {
+            Some(storage) if m5 => crate::g17::fw::m5::render_assembly::link_words(storage),
+            _ => [u64::MAX; 18],
+        };
+        let mask = (1u64 << 40) - 1;
+        let stamp = u64::from((ordinal as u32).wrapping_add(1).wrapping_shl(8));
+        let mut link_bad = 0u32;
+        for (bit, ok) in [
+            words[0] == u64::from(qids[1]),
+            words[1] == stamp,
+            words[3] == kicks[1].completion_value(payload) & mask,
+            words[4] == u64::from(payload) * 0x101,
+            words[5] == stamp,
+            words[6] == u64::from(qids[0]),
+            words[7] == u64::from(work_slot),
+            words[9] == kicks[0].completion_value(payload),
+            words[12] == u64::from(payload),
+            words[13] == stamp,
+            words[14] == u64::from(qids[1]),
+            words[15] == u64::from(work_slot),
+            words[16] == kicks[1].completion_value(payload),
+        ].into_iter().enumerate() {
+            if !ok {
+                link_bad |= 1 << bit;
+            }
+        }
+        
+        if m5 {
+            DIAG_PUBLISHED.fetch_add(1, Relaxed);
+            if identity_update {
+                DIAG_IDENTITY_UPDATES.fetch_add(1, Relaxed);
+            }
+            for stage in 0..2 {
+                let n = DIAG_PRIOR[stage][usize::from(prior[stage])].fetch_add(1, Relaxed) + 1;
+                if prior[stage] == 2 && (n <= 8 || n.is_power_of_two()) {
+                    pr_warn!("G17: diag stage {} qid {} ordinal {} ctx {} held {:#x} != expected {:#x} without a seed (payload {:#x}, covered {:?}, installed {:?}, cu {}, iu {}; {} so far)\n",
+                        stage, qids[stage], ordinal, context_id, held.map_or(0, |h| h[stage]),
+                        expected[stage], payload, covered, installed,
+                        context_update, identity_update, n);
+                }
+            }
+            if seeds.iter().any(|seed| seed.0 != 0)
+                && crate::module_parameters::m5_reseed.value() == 1
+                && installed == [true; 2] && !context_update
+            {
+                DIAG_FORCED_SEEDS.fetch_add(1, Relaxed);
+            }
+            if link_bad != 0 && diag_rate(&DIAG_LINK_BAD) {
+                pr_warn!("G17: diag render linkage mismatch {:#x} qids {:?} ordinal {} kicks [{:#x}, {:#x}] payload {:#x} slot {} words {:x?}\n",
+                    link_bad, qids, ordinal, kicks[0].get(), kicks[1].get(), payload, work_slot, words);
+            }
+            if !ctx_current && diag_rate(&DIAG_CTX_STALE) {
+                pr_warn!("G17: diag render published on a context {} that is not current (gen {}) qids {:?} ordinal {}\n",
+                    context_id, ctx_generation, qids, ordinal);
+            }
+        }
+        KBox::new(LinkDiag {
+            payload, seeds, covered, installed: installed,
+            context_update, identity_update, held, expected, prior,
+            ctx: context_id, ctx_generation: ctx_generation, ctx_current,
+            work_slot, link_bad, words,
+        }, GFP_KERNEL).ok()
+    
+}
+
+pub(crate) fn report_link_counters() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let prior = |s: usize| DIAG_PRIOR[s].each_ref().map(|c| c.load(Relaxed));
+    pr_warn!("G17: diag counters published={} identity_updates={} prior ta[seeded,held_eq,held_ne,unknown]={:?} 3d={:?} link_bad={} ctx_stale={} forced_seeds={} node_reinit={} node_linked={} node_undrained={}\n",
+        DIAG_PUBLISHED.load(Relaxed), DIAG_IDENTITY_UPDATES.load(Relaxed), prior(0), prior(1),
+        DIAG_LINK_BAD.load(Relaxed), DIAG_CTX_STALE.load(Relaxed), DIAG_FORCED_SEEDS.load(Relaxed),
+        crate::g17::context::DIAG_NODE_REINIT.load(Relaxed),
+        crate::g17::context::DIAG_NODE_LINKED.load(Relaxed),
+        crate::g17::context::DIAG_NODE_UNDRAINED.load(Relaxed));
 }
 
 /// A firmware-retired, unexecuted group must hold on two observations this far
@@ -870,7 +1029,8 @@ impl Pair {
                 qid: qids[stage],
                 install: !self.installed[stage],
                 completion_seed: (covered[stage]
-                    && (!m5 || !self.installed[stage] || self.context_update))
+                    && (!m5 || !self.installed[stage] || self.context_update
+                        || crate::module_parameters::m5_reseed.value() == 1))
                     .then(|| {
                         // The predecessor's timestamp with the stage's scratch payload: the
                         // previous pass's on fragment; with the G17D forms 0 on tiling, as the
@@ -947,6 +1107,7 @@ impl Pair {
                 .prev()
                 .completion_value(payload.wrapping_sub(1));
             if config.completion_seed_valid != 0
+                && crate::module_parameters::m5_reseed.value() != 1
                 && self.installed[stage]
                 && held.is_some_and(|held| held[stage] == reload)
             {
@@ -1202,6 +1363,11 @@ impl Pair {
             let next_inner = (next_ordinal as u32).wrapping_mul(2);
             Some((event_slot, next_event, inner, next_inner))
         };
+        let link_diag = link_diag(
+            m5, ordinal, qids, kicks, payload, work_slot, configs, held, covered, self.installed,
+            self.context_update, identity_update, context_id, packet.context.generation(),
+            packet.context.is_current(), memory.graph.m5_storage_ref(ordinal).ok(),
+        );
         let flist_submission = self.free_list.prepare_submission(2)?;
         let pm_submission = memory.manager.prepare_submission()?;
         let published = host.next_publication()?;
@@ -1231,6 +1397,7 @@ impl Pair {
                 stamps_owed: false,
                 barrier_words: diag_words,
                 barrier_counts: diag_counts,
+                link_diag,
                 barrier_types: diag_types,
             })
             .map_err(|_| EBUSY)?;
@@ -1582,6 +1749,23 @@ impl Pair {
     }
     /// Bounded first-fault evidence while the recovery owner has firmware
     /// halted, before it acknowledges state 1. Never changes retirement.
+    /// Diagnostics: the work lists and TTBAT entries of the contexts of this pair's renders
+    /// in flight (at most two distinct contexts).
+    pub(crate) fn report_recovery_work(&self) {
+        report_link_counters();
+        let mut seen = [u32::MAX; 2];
+        for active in self.active.iter() {
+            let id = active.packet.context.id();
+            if seen.contains(&id) {
+                continue;
+            }
+            match seen.iter().position(|s| *s == u32::MAX) {
+                Some(i) => seen[i] = id,
+                None => break,
+            }
+            active.packet.context.diag_dump_work();
+        }
+    }
     pub(crate) fn report_recovery(&self, stamps: Result<[u32; 2]>) {
         pr_warn!("G17: recovery render slot={} qids={:?} active={} prepared={} quarantined={} stamps={:?} freelist={:?}\n",
             self.slot, self.qids(), self.active.len(), self.prepared.is_some(),
@@ -1600,6 +1784,22 @@ impl Pair {
                 active.barrier_types,
                 active.barrier_counts[0], active.barrier_counts[1],
                 &active.barrier_words[..(usize::from(active.barrier_counts[0]) + usize::from(active.barrier_counts[1])).min(16)]);
+            let now = match self.memory.graph.m5_storage_ref(active.ticket.ordinal) {
+                Ok(storage) => crate::g17::fw::m5::render_assembly::link_words(storage),
+                Err(_) => [u64::MAX; 18],
+            };
+            if let Some(d) = active.link_diag.as_deref() {
+            pr_warn!("G17: recovery link ordinal={} ctx={} gen={} current_at_pub={} current_now={} payload={:#x} slot={} seeds={:x?} covered={:?} installed={:?} cu={} iu={} held={:x?} expected={:x?} prior={:?} link_bad={:#x}\n",
+                active.ticket.ordinal, d.ctx, d.ctx_generation, d.ctx_current,
+                active.packet.context.is_current(), d.payload, d.work_slot, d.seeds, d.covered,
+                d.installed, d.context_update, d.identity_update, d.held, d.expected, d.prior,
+                d.link_bad);
+            pr_warn!("G17: recovery link ordinal={} words@pub={:x?}\n", active.ticket.ordinal, d.words);
+            if now != d.words {
+                pr_warn!("G17: recovery link ordinal={} words CHANGED since publication: now={:x?}\n",
+                    active.ticket.ordinal, now);
+            }
+            }
             pr_warn!(
                 "G17: recovery render ordinal={} published={} ctx={} seq={} snapshot={:?}\n",
                 active.ticket.ordinal,
