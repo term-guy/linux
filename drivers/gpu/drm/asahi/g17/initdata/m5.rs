@@ -276,7 +276,13 @@ impl InitData {
             m::set_m5_region_maximum_power(self.object_mut(self.region_c)?.bytes_mut(), maximum)
                 .map_err(|_| EINVAL)?;
         }
-        if let Some(microseconds) = board.idle_standby_us {
+        // Experiment (`m5_idle_standby_us`, 0 by default): override region C's idle standby
+        // timer (GPU_J704_TIMEOUT.md round 2).
+        let standby = match crate::module_parameters::m5_idle_standby_us.value() {
+            0 => board.idle_standby_us,
+            us => Some(us),
+        };
+        if let Some(microseconds) = standby {
             m::set_m5_region_idle_standby(self.object_mut(self.region_c)?.bytes_mut(), microseconds)
                 .map_err(|_| EINVAL)?;
         }
