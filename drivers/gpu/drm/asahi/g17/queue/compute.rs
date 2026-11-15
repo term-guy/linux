@@ -840,6 +840,17 @@ impl Queue {
     pub(crate) fn qid(&self) -> u8 {
         self.kick.id().qid()
     }
+    /// Diagnostics while firmware is halted: this queue's commands in flight.
+    pub(crate) fn report_recovery(&self, stamp: Result<u32>) {
+        let count = self.active.iter().count();
+        if count == 0 {
+            return;
+        }
+        let first = self.active.front().and_then(|a| a.ticket.map(|t| (t.context_id, t.kick)));
+        let last = self.active.back().and_then(|a| a.ticket.map(|t| t.kick));
+        pr_warn!("G17: recovery compute qid={} active={} stamp={:x?} first(ctx,kick)={:x?} last kick={:x?} quarantined={}\n",
+            self.qid(), count, stamp, first, last, self.quarantined);
+    }
     /// The queue record the firmware runs this queue from.
     pub(crate) fn queue_record_va(&self) -> u64 {
         self.graph.graph.gpu_va()

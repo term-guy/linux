@@ -35,6 +35,9 @@ impl Registry {
         for (q, stamp) in stamps.iter_mut().enumerate() {
             *stamp = port.stamp(q as u8).unwrap_or(u32::MAX);
         }
+        for queue in self.compute.iter().flatten().filter_map(|entry| entry.queue.as_deref()) {
+            queue.report_recovery(port.stamp(queue.qid()));
+        }
         for chunk in 0..8 {
             pr_warn!("G17: recovery stamps q{}..: {:x?}\n", chunk * 16, &stamps[chunk * 16..chunk * 16 + 16]);
         }
