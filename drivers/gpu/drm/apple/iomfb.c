@@ -3438,11 +3438,33 @@ bool iomfb_apply_backlight_h17p(struct apple_dcp *dcp,
 	return true;
 }
 
+/*
+ * Log the DCP's answer to every present that carried a backlight level.
+ * Bring-up aid for panels nobody can look at; off by default.
+ */
+static bool backlight_trace;
+module_param(backlight_trace, bool, 0644);
+MODULE_PARM_DESC(backlight_trace,
+		 "Log each H17P/firmware 27 backlight present and whether DCP completed it (default: off)");
+
+static void iomfb_trace_backlight(struct apple_dcp *dcp,
+				  struct iomfb_transaction *transaction,
+				  bool accepted)
+{
+	if (READ_ONCE(backlight_trace))
+		dev_info(dcp->dev, "backlight present seq %llu %u nits%s: %s\n",
+			 transaction->backlight.sequence,
+			 transaction->backlight.nits,
+			 transaction->brightness_only ? " (brightness only)" : "",
+			 accepted ? "completed" : "failed");
+}
+
 void iomfb_present_failed_h17p(struct apple_dcp *dcp)
 {
 	struct iomfb_transaction *transaction = dcp->iomfb.active;
 
 	if (transaction && transaction->backlight_reserved) {
+		iomfb_trace_backlight(dcp, transaction, false);
 		dcp_backlight_complete(dcp, transaction->backlight.sequence, false);
 		transaction->backlight_reserved = false;
 		transaction->backlight_failed = true;
@@ -3463,6 +3485,7 @@ bool iomfb_present_complete_h17p(struct apple_dcp *dcp)
 	if (transaction) {
 		transaction->completed = true;
 		if (transaction->backlight_reserved) {
+			iomfb_trace_backlight(dcp, transaction, true);
 			dcp_backlight_complete(dcp, transaction->backlight.sequence, true);
 			transaction->backlight_reserved = false;
 		}
