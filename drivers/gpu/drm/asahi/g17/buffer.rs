@@ -590,11 +590,19 @@ impl MetricsLease {
             self.backing.map_range(vm, offset..offset + pitch, at..at + pitch as u64,
                 mmu::UAT_PGSZ as u64, mmu::PROT_GPU_SHARED_RW, 0).ok()
         }).flatten();
+        let fixed_failed = super::J813_FORMS.load(Ordering::Relaxed) && fixed.is_none();
         let client = match fixed {
             Some(client) => client,
             None => self.backing.map_range(vm, offset..offset + pitch, BlockGeometry::M5_COMPACT,
                 mmu::UAT_PGSZ as u64, mmu::PROT_GPU_SHARED_RW, 0)?,
         };
+        if fixed_failed {
+            static REPORTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            if REPORTED.fetch_add(1, Ordering::Relaxed) < 16 {
+                pr_warn!("G17: metrics slot {} not at its fixed compact address {:#x}; client mapping at {:#x}\n",
+                    self.slot, BlockGeometry::M5_COMPACT.start + offset as u64, client.iova());
+            }
+        }
         self.addresses.client = client.iova();
         self.client = Some(client);
         Ok(())
@@ -855,6 +863,9 @@ impl Manager {
         let read = |offset| -> Result<u32> {
             Ok(self.graph.word(offset)?.load(Ordering::Relaxed))
         };
+        pr_warn!("G17: recovery tvb id={} metrics slot {} client {:#x} fw {:#x} state {:#x}\n",
+            self.buffer_id, self.metrics.slot, self.metrics.addresses.client,
+            self.metrics.addresses.firmware, self.graph.gpu_va());
         pr_warn!("G17: recovery tvb id={} blocks={} cursors={:?} pages={:?} capacity={:?} producer={:?} consumer={:?} max_pages={:?} reset={:?} initialized={}\n",
             self.buffer_id, self.blocks(), self.cursors(),
             read(core::mem::offset_of!(fw::State, pages)),
