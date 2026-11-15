@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * J704 bring-up test tree with the internal display pipeline: the USB
+ * console test tree (t8142-j704-test.dts) with the display subsystem, the
+ * DCP mailbox and the DCP DART enabled again. The loader enables the DCP and
+ * the display DART itself when it hands the running display session over;
+ * they stay as the board file has them.
+ */
+
+#include "t8142-j704-test.dts"
+
+/ {
+	model = "Apple MacBook Pro (14-inch, M5, 2025) [aurora test, display]";
+};
+
+&display {
+	status = "okay";
+};
+
+&dcp_mbox {
+	status = "okay";
+};
+
+&dcp_dart {
+	status = "okay";
+};
