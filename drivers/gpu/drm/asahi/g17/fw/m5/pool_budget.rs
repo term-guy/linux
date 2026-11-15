@@ -148,6 +148,13 @@ impl Sizes {
         let blocks = usize::try_from(self.ideal / render_block_bytes() as u64)
             .map_err(|_| PoolError::Geometry)?;
         if self.ideal % render_block_bytes() as u64 != 0 { return Err(PoolError::Geometry); }
+        // Experiment (`m5_pool_scale`): provision this many times the computed private memory.
+        let scale = crate::module_parameters::m5_pool_scale.value() as usize;
+        if scale > 1 {
+            if let Some(Ok(scaled)) = blocks.checked_mul(scale).map(PoolGeometry::g17s) {
+                return Ok(scaled);
+            }
+        }
         PoolGeometry::g17s(blocks)
     }
 }

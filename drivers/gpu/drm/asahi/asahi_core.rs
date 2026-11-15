@@ -142,6 +142,10 @@ module! {
             default: 0,
             description: "G17 experiment: at most this many commands of a queue in flight, all through the scheduler (0: the queue depth, with inline publication)",
         },
+        m5_pool_scale: u32 {
+            default: 1,
+            description: "M5 experiment: provision this many times the computed private-memory pool blocks (1: as computed)",
+        },
         m5_probe_only: u32 {
             default: 0,
             description: "M5 (T8142) on 26A428: 1 logs the GPU ID registers and core masks and refuses the GPU before the UAT or the firmware are touched (bring-up); 0 starts the board's configuration",
