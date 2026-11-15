@@ -177,6 +177,8 @@ struct Active {
     /// Diagnostics: the tiling then fragment kick barrier words and their counts.
     barrier_words: [u64; 16],
     barrier_counts: [u8; 2],
+    /// Diagnostics: two-bit classes, tiling (with parent) then fragment (with parent/ancestor).
+    barrier_types: u64,
 }
 
 /// A firmware-retired, unexecuted group must hold on two observations this far
@@ -1019,8 +1021,25 @@ impl Pair {
             .copy_from_slice(&barriers.fragment_types[..barriers.fragment_count + 1]);
         fragment_types[barriers.fragment_count + 1] = 1;
         let fragment_typed = barriers.fragment_count + 1 + usize::from(ancestor.is_some());
+        let mut tiling_types = barriers.tiling_types;
+        // On the J813 forms (T8142) every dependency of every TA and 3D kick takes the
+        // completion class, as in macOS 27.0's own kick queues (see
+        // `fw::m5::compute::explicit_dependency`). The pipelined classes let a TA wait only
+        // for the last 3D kick to be taken up rather than to finish: with more than four
+        // clients a TA then started right as another context's 3D did, and the firmware
+        // restarted the GPU at the end of that render's TA (or the 3D faulted in the TA's VM),
+        // blaming the 3D queue.
+        if m5 && j813 {
+            tiling_types[..barriers.tiling_count + 1].fill(crate::g17::fw::m5::compute::COMPLETION_DEPENDENCY);
+            fragment_types[..fragment_typed].fill(crate::g17::fw::m5::compute::COMPLETION_DEPENDENCY);
+        }
+        let mut diag_types = 0u64;
+        for (index, kind) in Iterator::chain(tiling_types[..barriers.tiling_count + 1].iter(),
+            fragment_types[..fragment_typed].iter()).enumerate().take(32) {
+            diag_types |= u64::from(*kind) << (2 * index);
+        }
         let barrier_types = [
-            &barriers.tiling_types[..barriers.tiling_count + 1],
+            &tiling_types[..barriers.tiling_count + 1],
             &fragment_types[..fragment_typed],
         ];
         let prepared = self.prepared.as_ref().ok_or(EIO)?;
@@ -1194,6 +1213,7 @@ impl Pair {
                 stamps_owed: false,
                 barrier_words: diag_words,
                 barrier_counts: diag_counts,
+                barrier_types: diag_types,
             })
             .map_err(|_| EBUSY)?;
         self.prepared = None;
@@ -1556,9 +1576,10 @@ impl Pair {
                     target::Layout::new(pass, self.clusters, self.variant.programs));
             }
             pr_warn!(
-                "G17: recovery render ordinal={} kicks=[{:#x}, {:#x}] stages={:x?} barriers ta={} 3d={} {:x?}\n",
+                "G17: recovery render ordinal={} kicks=[{:#x}, {:#x}] stages={:x?} types={:#x} barriers ta={} 3d={} {:x?}\n",
                 active.ticket.ordinal, active.kicks[0].get(), active.kicks[1].get(),
                 self.memory.stage_timestamps(active.ticket.ordinal),
+                active.barrier_types,
                 active.barrier_counts[0], active.barrier_counts[1],
                 &active.barrier_words[..(usize::from(active.barrier_counts[0]) + usize::from(active.barrier_counts[1])).min(16)]);
             pr_warn!(
