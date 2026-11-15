@@ -428,6 +428,9 @@ pub(crate) struct Pair {
     /// Failed attempts to settle this pair after the firmware drained it, and when the next
     /// attempt is due (host ns); see [`Pair::note_drain_failure`].
     drain_failures: u32,
+    /// Diagnostics: the last renders retired here: (kicks, TA barrier words, stage timestamps).
+    retired_ring: [([u64; 2], [u64; 2], [u64; 4]); 4],
+    retired_next: usize,
     drain_retry_at: u64,
 }
 
@@ -561,6 +564,8 @@ impl Pair {
             configured_context: None,
             configured_qos: None,
             drain_failures: 0,
+            retired_ring: [([0; 2], [0; 2], [0; 4]); 4],
+            retired_next: 0,
             drain_retry_at: 0,
             channel_error: false,
         }))
@@ -1781,6 +1786,15 @@ impl Pair {
             active.packet.context.diag_dump_work();
         }
     }
+    /// Diagnostics: the last renders retired on this pair.
+    pub(crate) fn report_retired(&self) {
+        for back in 1..=4usize {
+            let Some(index) = self.retired_next.checked_sub(back) else { break };
+            let (kicks, barriers, ts) = self.retired_ring[index % 4];
+            pr_warn!("G17: recovery retired qids={:?} kicks=[{:#x}, {:#x}] ta_barriers={:x?} stages={:x?}\n",
+                self.qids(), kicks[0], kicks[1], barriers, ts);
+        }
+    }
     pub(crate) fn report_recovery(&self, stamps: Result<[u32; 2]>) {
         pr_warn!("G17: recovery render slot={} qids={:?} active={} prepared={} quarantined={} stamps={:?} freelist={:?}\n",
             self.slot, self.qids(), self.active.len(), self.prepared.is_some(),
@@ -2385,6 +2399,16 @@ impl Pair {
         };
         let ordinal = front.ticket.ordinal;
         let context_update = front.context_update;
+        {
+            let entry = (
+                [front.kicks[0].get(), front.kicks[1].get()],
+                [front.barrier_words[0], front.barrier_words[1]],
+                timestamps,
+            );
+            let next = self.retired_next;
+            self.retired_ring[next % 4] = entry;
+            self.retired_next = next.wrapping_add(1);
+        }
         if stampless {
             retirement::note_stampless(u16::from(self.slot), ordinal);
         }

@@ -289,6 +289,8 @@ impl ParkedPair {
             configured_context: None,
             configured_qos: None,
             drain_failures: 0,
+            retired_ring: [([0; 2], [0; 2], [0; 4]); 4],
+            retired_next: 0,
             drain_retry_at: 0,
             channel_error: false,
         }))

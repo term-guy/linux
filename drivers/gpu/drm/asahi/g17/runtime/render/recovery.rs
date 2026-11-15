@@ -32,6 +32,9 @@ impl Registry {
                 pair.report_recovery((|| Ok([port.stamp(qids[0])?, port.stamp(qids[1])?]))());
             }
         }
+        for pair in self.render.entries.iter().flatten().filter_map(|entry| entry.pair.as_ref()) {
+            pair.report_retired();
+        }
         let mut stamps = [0u32; 128];
         for (q, stamp) in stamps.iter_mut().enumerate() {
             *stamp = port.stamp(q as u8).unwrap_or(u32::MAX);
