@@ -131,6 +131,7 @@ struct WorkStorage {
 pub(crate) static DIAG_NODE_REINIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_LINKED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_REARM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(crate) static DIAG_NODE_REARM_LINKED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_MIXED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_UNDRAINED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -168,6 +169,27 @@ impl WorkStorage {
             }
         }
         (found, count)
+    }
+    /// Diagnostics: whether node `slot` is reachable from the firmware job-list head through
+    /// the nodes' next words (+0x98), within 64 hops. `None`: a link left the object.
+    fn diag_listed(&self, slot: usize) -> Option<bool> {
+        let base = self.object.gpu_va();
+        let target = base + (slot * NODE_STRIDE) as u64;
+        let mut p = self.diag_u64(UAT_PGSZ + 0x400)?;
+        for _ in 0..64 {
+            if p == 0 {
+                return Some(false);
+            }
+            if p == target {
+                return Some(true);
+            }
+            let offset = p.checked_sub(base)? as usize;
+            if offset >= STATE_COUNT * NODE_STRIDE || offset % NODE_STRIDE != 0 {
+                return None;
+            }
+            p = self.diag_u64(offset + 0x98)?;
+        }
+        None
     }
     /// Diagnostics: the list head and the pointer-like words of every initialized node.
     pub(crate) fn diag_dump(&self, context: u32) {
@@ -263,6 +285,12 @@ impl WorkStorage {
             if before != 0 && completed == before {
                 self.diag_rearmed[slot] = self.diag_rearmed[slot].saturating_add(1);
                 DIAG_NODE_REARM.fetch_add(1, Relaxed);
+                // Kicks added to a drained node the firmware still lists (or an unreadable
+                // list): the firmware may not have finished retiring the node.
+                if self.diag_listed(slot) != Some(false) {
+                    self.diag_rearmed[slot] |= 0x80;
+                    DIAG_NODE_REARM_LINKED.fetch_add(1, Relaxed);
+                }
             }
             let adds = self.diag_adds[slot];
             // An engine change on one node (render adds 2, compute 1).
