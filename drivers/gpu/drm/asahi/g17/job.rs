@@ -533,12 +533,19 @@ impl<B: Backend> Scheduler<B> {
     pub(crate) fn new(dev: &AsahiDrmDevice, backend: Arc<B>, engine: Engine, allowance_ms: u32)
         -> Result<Self>
     {
+        // Experiment (`m5_queue_inflight`): at most that many commands of a queue in flight.
+        let limit = crate::module_parameters::m5_queue_inflight.value();
+        let (render_credits, compute_credits) = if limit != 0 {
+            (RENDER_CREDITS.min(limit), COMPUTE_CREDITS.min(limit))
+        } else {
+            (RENDER_CREDITS, COMPUTE_CREDITS)
+        };
         let (credits, name) = match engine {
             Engine::Render => (
-                RENDER_CREDITS.checked_mul(backend.render_pairs()).ok_or(EOVERFLOW)?,
+                render_credits.checked_mul(backend.render_pairs()).ok_or(EOVERFLOW)?,
                 c_str!("aurora_g17_render"),
             ),
-            Engine::Compute => (COMPUTE_CREDITS, c_str!("aurora_g17_compute")),
+            Engine::Compute => (compute_credits, c_str!("aurora_g17_compute")),
         };
         let device = dev.as_ref().as_ref();
         let submit = if backend.creator_cluster_scheduling() {

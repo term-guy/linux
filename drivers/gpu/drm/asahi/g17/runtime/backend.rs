@@ -448,6 +448,11 @@ impl job::Backend for Backend {
     }
 
     fn try_early(&self, packet: &Arc<Packet>) -> bool {
+        // Experiment: with an in-flight limit every command goes through its scheduler,
+        // whose credits enforce the limit.
+        if crate::module_parameters::m5_queue_inflight.value() != 0 {
+            return false;
+        }
         match packet.engine() {
             Engine::Render => self.try_render_early(packet),
             Engine::Compute => self.try_compute_early(packet),
