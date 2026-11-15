@@ -174,6 +174,9 @@ struct Active {
     /// result, but the firmware may still store the stamps through its descriptor: the
     /// descriptor slot stays held until stamps cover the group.
     stamps_owed: bool,
+    /// Diagnostics: the tiling then fragment kick barrier words and their counts.
+    barrier_words: [u64; 16],
+    barrier_counts: [u8; 2],
 }
 
 /// A firmware-retired, unexecuted group must hold on two observations this far
@@ -394,6 +397,10 @@ impl Pair {
             drain_retry_at: 0,
             channel_error: false,
         }))
+    }
+    /// Diagnostics: renders this pair has in flight.
+    pub(crate) fn active_count(&self) -> usize {
+        self.active.len()
     }
     pub(crate) fn qids(&self) -> [u8; 2] {
         self.kicks.each_ref().map(|kick| kick.id().qid())
@@ -991,6 +998,15 @@ impl Pair {
             }
         }
         let tiling_barriers = &barriers.tiling[..barriers.tiling_count];
+        let mut diag_words = [0u64; 16];
+        let mut diag_n = 0usize;
+        for dependency in Iterator::chain(tiling_barriers.iter(), barriers.fragment[..barriers.fragment_count].iter()) {
+            if diag_n < diag_words.len() {
+                diag_words[diag_n] = dependency.word();
+                diag_n += 1;
+            }
+        }
+        let diag_counts = [barriers.tiling_count as u8, barriers.fragment_count as u8];
         // With the G17D forms a fragment kick with history also names its parent's
         // predecessor, in class 1, after the self-parent (classes [1, 3, 1] for a lone pass).
         let ancestor = if m5 && self.g17d_forms() {
@@ -1176,6 +1192,8 @@ impl Pair {
                 abandoned_since: None,
                 stamp_wait_since: None,
                 stamps_owed: false,
+                barrier_words: diag_words,
+                barrier_counts: diag_counts,
             })
             .map_err(|_| EBUSY)?;
         self.prepared = None;
@@ -1537,6 +1555,12 @@ impl Pair {
                     active.ticket.ordinal, pass.width, pass.height, pass.layers,
                     target::Layout::new(pass, self.clusters, self.variant.programs));
             }
+            pr_warn!(
+                "G17: recovery render ordinal={} kicks=[{:#x}, {:#x}] stages={:x?} barriers ta={} 3d={} {:x?}\n",
+                active.ticket.ordinal, active.kicks[0].get(), active.kicks[1].get(),
+                self.memory.stage_timestamps(active.ticket.ordinal),
+                active.barrier_counts[0], active.barrier_counts[1],
+                &active.barrier_words[..(usize::from(active.barrier_counts[0]) + usize::from(active.barrier_counts[1])).min(16)]);
             pr_warn!(
                 "G17: recovery render ordinal={} published={} ctx={} seq={} snapshot={:?}\n",
                 active.ticket.ordinal,

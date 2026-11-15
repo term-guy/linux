@@ -20,6 +20,24 @@ impl Registry {
                     qid, entry.borrowed_active, entry.constructing);
             }
         }
+        // Diagnostics: every other pair, and the stamps of every QID they wait on.
+        for entry in self.render.entries.iter().flatten().filter(|entry| {
+            !entry.reservation.ids.iter().any(|id| id.qid() == qid)
+        }) {
+            if let Some(pair) = &entry.pair {
+                if pair.active_count() == 0 { continue; }
+                let qids = pair.qids();
+                pr_warn!("G17: recovery other pair:\n");
+                pair.report_recovery((|| Ok([port.stamp(qids[0])?, port.stamp(qids[1])?]))());
+            }
+        }
+        let mut stamps = [0u32; 128];
+        for (q, stamp) in stamps.iter_mut().enumerate() {
+            *stamp = port.stamp(q as u8).unwrap_or(u32::MAX);
+        }
+        for chunk in 0..8 {
+            pr_warn!("G17: recovery stamps q{}..: {:x?}\n", chunk * 16, &stamps[chunk * 16..chunk * 16 + 16]);
+        }
     }
 
     pub(in crate::g17::runtime) fn render_pass_started(&self, qid: u8, stamp: u64) -> Option<bool> {

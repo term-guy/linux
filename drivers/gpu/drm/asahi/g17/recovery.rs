@@ -134,6 +134,8 @@ pub(super) trait Memory {
     fn entry(&self, index: usize) -> Result<(u32, u32)>;
     /// One millisecond wait; this is polled because the firmware sends no state-3 notification.
     fn wait_tick(&self);
+    /// Diagnostics only.
+    fn report_raw(&self) {}
     /// The M5 firmware's recovery table, whose stamp form is not the G17P one.
     fn is_m5(&self) -> bool;
 }
@@ -302,6 +304,7 @@ pub(super) fn service<H: Host>(
     // still retire it with stamps and records that look like success, so it is
     // marked before firmware resumes and never reports success.
     let entries = read_entries(host);
+    host.report_raw();
     host.transition(3, 0)?;
     if host.recovery_state()? != 0 {
         return Err(EIO);
@@ -362,6 +365,13 @@ fn read_entries<H: Host>(host: &mut H) -> Entries {
             break;
         }
         if m5 {
+            if entries.listed <= 24 {
+                let entry_qid = (flags >> 4) & 0x7f;
+                let entry_guilty = flags & u32::from(GUILTY) != 0;
+                let entry_cancelled = flags & u32::from(CANCELLED) != 0;
+                pr_warn!("G17: recovery entry {} flags {:#x} (qid {} guilty {} cancelled {}) stamp {:#x}\n",
+                    index, flags, entry_qid, entry_guilty, entry_cancelled, stamp);
+            }
             continue;
         }
         let qid = ((flags >> 4) & 0x7f) as u8;

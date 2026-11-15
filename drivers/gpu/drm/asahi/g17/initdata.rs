@@ -1917,6 +1917,20 @@ impl InitData {
 }
 
 impl InitData {
+    /// Diagnostics: the M5 status-B words around the recovery state, from `start`.
+    pub(super) fn m5_status_b_words(&self, start: usize) -> Result<[u32; 32]> {
+        if !self.m5 {
+            return Err(ENODEV);
+        }
+        fence(Ordering::Acquire);
+        let object = self.object(self.cluster)?;
+        let mut words = [0u32; 32];
+        for (index, word) in words.iter_mut().enumerate() {
+            *word = object.word(self.graph.private.status_b + start + index * 4)?.load(Ordering::Relaxed);
+        }
+        Ok(words)
+    }
+
     /// The M5 firmware's progress word ([`super::fw::m5::initdata::M5_PROGRESS`]); ENODEV on
     /// other firmware.
     pub(super) fn m5_progress(&self) -> Result<u32> {

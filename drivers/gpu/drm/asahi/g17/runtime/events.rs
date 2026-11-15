@@ -187,6 +187,15 @@ impl recovery::Memory for Service<'_> {
     fn wait_tick(&self) {
         self.firmware.init.wait_tick();
     }
+    fn report_raw(&self) {
+        for start in [0x4a98usize, 0x4b18] {
+            pr_warn!("G17: recovery status_b+{:#x}: {:x?}\n", start,
+                self.firmware.init.m5_status_b_words(start));
+        }
+        if let Ok(registers) = self.firmware.bridge.regs.m5_fault_registers() {
+            pr_warn!("G17: recovery registers after state 3: {:x?}\n", registers);
+        }
+    }
 }
 
 impl recovery::Queues for Service<'_> {
