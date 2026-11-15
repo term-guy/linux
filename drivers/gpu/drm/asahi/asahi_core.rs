@@ -146,6 +146,14 @@ module! {
             default: 0,
             description: "M5 experiment: 1 seeds both queues' predecessor completion on every covered render publication (0: only at install or a context update)",
         },
+        m5_node_settle: u32 {
+            default: 0,
+            description: "G17 experiment: 1 holds a render publication while its ioctl's work node has every counted kick completed but the firmware still lists it",
+        },
+        m5_node_per_command: u32 {
+            default: 0,
+            description: "G17 experiment: 1 gives every command after the first of a submission its own work-state node",
+        },
         m5_pool_scale: u32 {
             default: 1,
             description: "M5 experiment: provision this many times the computed private-memory pool blocks (1: as computed)",

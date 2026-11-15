@@ -195,6 +195,8 @@ pub(crate) struct Submission {
     /// is queued, before its fence is signalled off-lock: a consumer published
     /// in between needs no wait on it.
     retired: AtomicBool,
+    /// Experiment (`m5_node_per_command`): members created so far.
+    members_created: AtomicU8,
 }
 
 impl Submission {
@@ -211,6 +213,7 @@ impl Submission {
                 owners: AtomicU8::new(1),
                 firmware_source,
                 retired: AtomicBool::new(false),
+                members_created: AtomicU8::new(0),
             }),
             GFP_KERNEL,
         )
@@ -300,9 +303,19 @@ impl Aggregate {
     pub(crate) fn member(&self) -> Member {
         self.source().remaining.fetch_add(1, Ordering::Relaxed);
         self.source().owners.fetch_add(1, Ordering::Relaxed);
+        // Experiment (`m5_node_per_command`): the first command uses the submission's work-state
+        // node, every later one a node of its own, ordered after it, so that no node counts the
+        // kicks of more than one command.
+        let own = (crate::module_parameters::m5_node_per_command.value() == 1
+            && self.source().members_created.fetch_add(1, Ordering::Relaxed) != 0)
+            .then(|| self.source().state.lock().work.as_ref().map(|work| work.sibling()))
+            .flatten()
+            .and_then(|lease| lease.ok())
+            .and_then(|lease| Arc::new(lease, GFP_KERNEL).ok());
         Member {
             aggregate: self.clone(),
             complete: AtomicBool::new(false),
+            own,
         }
     }
     fn finish_enqueue(&self, result: Result) {
@@ -319,12 +332,17 @@ impl Aggregate {
 pub(crate) struct Member {
     aggregate: Aggregate,
     complete: AtomicBool,
+    /// Experiment (`m5_node_per_command`): this command's own work-state lease.
+    own: Option<Arc<WorkStateLease>>,
 }
 impl Member {
     pub(super) fn needs_source_ready(&self) -> bool {
         self.aggregate.source().firmware_source
     }
     pub(crate) fn work_state(&self) -> Result<Arc<WorkStateLease>> {
+        if let Some(own) = &self.own {
+            return Ok(own.clone());
+        }
         self.aggregate
             .source()
             .state

@@ -132,6 +132,7 @@ pub(crate) static DIAG_NODE_REINIT: core::sync::atomic::AtomicU64 = core::sync::
 pub(crate) static DIAG_NODE_LINKED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_REARM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_REARM_LINKED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(crate) static DIAG_NODE_SETTLE_WAITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_MIXED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_UNDRAINED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -751,6 +752,10 @@ impl WorkStateLease {
             ordinal,
         })
     }
+    /// Experiment (`m5_node_per_command`): a lease of the same context, ordered after this one.
+    pub(crate) fn sibling(&self) -> Result<Self> {
+        Self::deferred(self.context.clone())
+    }
     /// The ioctl's node, taking one for `engine`'s admission if it has none yet. EBUSY: an older
     /// ioctl still waits for its node (see `identity::Order`), or no node may be taken now
     /// (see `identity::may_take`); an older ioctl's admission or a return lets it try again.
@@ -818,6 +823,23 @@ impl WorkStateLease {
             return Err(EINVAL);
         }
         self.context.work.lock().drained(word)
+    }
+    /// Experiment (`m5_node_settle`): every kick counted on this ioctl's node completed, yet
+    /// the firmware job list still links the node (or the walk failed).
+    pub(crate) fn drained_listed(&self) -> bool {
+        let word = self.word();
+        if word == FREE {
+            return false;
+        }
+        let work = self.context.work.lock();
+        let slot = (word & 63) as usize;
+        if work.words.get(slot) != Some(&Some(word)) || work.counts[slot] == 0 {
+            return false;
+        }
+        let completed = work.object.word(slot * NODE_STRIDE + 0xc)
+            .map_or(u32::MAX, |w| w.load(Ordering::Relaxed));
+        fence(Ordering::Acquire);
+        completed == work.counts[slot] && work.diag_listed(slot) != Some(false)
     }
     pub(crate) fn add_submitted_kicks(&self, kicks: u32) -> Result<u32> {
         self.context

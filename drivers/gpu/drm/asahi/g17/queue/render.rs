@@ -332,7 +332,7 @@ fn link_diag(
 pub(crate) fn report_link_counters() {
     use core::sync::atomic::Ordering::Relaxed;
     let prior = |s: usize| DIAG_PRIOR[s].each_ref().map(|c| c.load(Relaxed));
-    pr_warn!("G17: diag counters published={} identity_updates={} prior ta[seeded,held_eq,held_ne,unknown]={:?} 3d={:?} link_bad={} ctx_stale={} forced_seeds={} node_reinit={} node_linked={} node_undrained={} node_rearm={} node_rearm_linked={} node_mixed={}\n",
+    pr_warn!("G17: diag counters published={} identity_updates={} prior ta[seeded,held_eq,held_ne,unknown]={:?} 3d={:?} link_bad={} ctx_stale={} forced_seeds={} node_reinit={} node_linked={} node_undrained={} node_rearm={} node_rearm_linked={} node_mixed={} settle_waits={}\n",
         DIAG_PUBLISHED.load(Relaxed), DIAG_IDENTITY_UPDATES.load(Relaxed), prior(0), prior(1),
         DIAG_LINK_BAD.load(Relaxed), DIAG_CTX_STALE.load(Relaxed), DIAG_FORCED_SEEDS.load(Relaxed),
         crate::g17::context::DIAG_NODE_REINIT.load(Relaxed),
@@ -340,7 +340,8 @@ pub(crate) fn report_link_counters() {
         crate::g17::context::DIAG_NODE_UNDRAINED.load(Relaxed),
         crate::g17::context::DIAG_NODE_REARM.load(Relaxed),
         crate::g17::context::DIAG_NODE_REARM_LINKED.load(Relaxed),
-        crate::g17::context::DIAG_NODE_MIXED.load(Relaxed));
+        crate::g17::context::DIAG_NODE_MIXED.load(Relaxed),
+        crate::g17::context::DIAG_NODE_SETTLE_WAITS.load(Relaxed));
 }
 
 /// A firmware-retired, unexecuted group must hold on two observations this far
@@ -957,6 +958,13 @@ impl Pair {
             if lease.buffer_context.is_some_and(|bound| bound != context_id) {
                 return Err(EBUSY);
             }
+        }
+        // Experiment (`m5_node_settle`): do not count new kicks on a drained node the firmware
+        // has not unlinked yet; the publisher retries on the next render event (<= 10 ms).
+        if m5 && crate::module_parameters::m5_node_settle.value() == 1 && packet.completion.work_state()?.drained_listed() {
+            crate::g17::context::DIAG_NODE_SETTLE_WAITS
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return Err(EBUSY);
         }
         self.graph_started = true;
         let ordinal = self.ordinal;
