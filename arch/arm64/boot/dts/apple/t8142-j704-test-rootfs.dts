@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * J704 bring-up test tree for booting the Ubuntu root filesystem on the
+ * internal SSD: the display test tree (t8142-j704-test-dcp.dts: USB gadget
+ * console on the right-hand port, DCP display, GPU) with the ANS2 NVMe
+ * controller, its SART and its mailbox enabled again
+ * (t8142-j704-nvme.dtsi). PCIe (Wi-Fi/BT/SD), the other USB-C ports, AVD and
+ * MTP stay disabled as in t8142-j704-test.dts.
+ */
+
+#include "t8142-j704-test-dcp.dts"
+
+/ {
+	model = "Apple MacBook Pro (14-inch, M5, 2025) [aurora test, rootfs]";
+};
+
+&ans_mbox {
+	status = "okay";
+};
+
+&sart {
+	status = "okay";
+};
+
+&nvme {
+	status = "okay";
+};
