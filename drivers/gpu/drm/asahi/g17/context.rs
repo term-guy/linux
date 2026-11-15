@@ -122,10 +122,16 @@ struct WorkStorage {
     words: [Option<u32>; STATE_COUNT],
     counts: [u32; STATE_COUNT],
     render: RenderSlots,
+    /// Diagnostics: per node, the kick counts added (one hex digit each, newest lowest) and
+    /// whether kicks were added while the firmware had completed every kick counted so far.
+    diag_adds: [u32; STATE_COUNT],
+    diag_rearmed: [u8; STATE_COUNT],
 }
 /// Diagnostics (GPU_J704_TIMEOUT.md round 2): work-node reinitialization checks.
 pub(crate) static DIAG_NODE_REINIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_LINKED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(crate) static DIAG_NODE_REARM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(crate) static DIAG_NODE_MIXED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_UNDRAINED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 impl WorkStorage {
@@ -183,8 +189,9 @@ impl WorkStorage {
                     }
                 }
             }
-            pr_warn!("G17: recovery work node ctx {} slot {} word {:#x} count {} completed {} links {:x?}\n",
-                context, slot, word, self.counts[slot], completed, &links[..n]);
+            pr_warn!("G17: recovery work node ctx {} slot {} word {:#x} count {} completed {} adds {:#x} rearmed {} links {:x?}\n",
+                context, slot, word, self.counts[slot], completed, self.diag_adds[slot],
+                self.diag_rearmed[slot], &links[..n]);
         }
     }
     fn initialize(&mut self, word: u32) -> Result {
@@ -225,6 +232,8 @@ impl WorkStorage {
         self.object.word(counter)?.store(0, Ordering::Relaxed);
         self.words[slot] = Some(word);
         self.counts[slot] = 0;
+        self.diag_adds[slot] = 0;
+        self.diag_rearmed[slot] = 0;
         fence(Ordering::Release);
         Ok(())
     }
@@ -245,6 +254,22 @@ impl WorkStorage {
         let slot = (word & 63) as usize;
         if self.words.get(slot) != Some(&Some(word)) {
             return Err(EINVAL);
+        }
+        if add {
+            use core::sync::atomic::Ordering::Relaxed;
+            let completed = self.object.word(slot * NODE_STRIDE + 0xc)
+                .map_or(u32::MAX, |w| w.load(Ordering::Relaxed));
+            let before = self.counts[slot];
+            if before != 0 && completed == before {
+                self.diag_rearmed[slot] = self.diag_rearmed[slot].saturating_add(1);
+                DIAG_NODE_REARM.fetch_add(1, Relaxed);
+            }
+            let adds = self.diag_adds[slot];
+            // An engine change on one node (render adds 2, compute 1).
+            if adds != 0 && adds & 0xf != kicks & 0xf {
+                DIAG_NODE_MIXED.fetch_add(1, Relaxed);
+            }
+            self.diag_adds[slot] = adds << 4 | (kicks & 0xf);
         }
         let value = if add {
             self.counts[slot].checked_add(kicks)
@@ -408,7 +433,9 @@ impl Context {
                     object,
                     words: [None; STATE_COUNT],
                     counts: [0; STATE_COUNT],
-                    render: RenderSlots::new()
+                    render: RenderSlots::new(),
+                    diag_adds: [0; STATE_COUNT],
+                    diag_rearmed: [0; STATE_COUNT]
                 },
                 "G17 work states"
             ),
