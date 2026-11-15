@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * J704 bring-up test tree for an NFS root over the USB gadget network: the
+ * display test tree (t8142-j704-test-dcp.dts: USB gadget console/network on
+ * the right-hand port, DCP display, GPU). The internal SSD stays completely
+ * off: the ANS2 NVMe controller, its SART and its mailbox are disabled (as in
+ * t8142-j704-test.dts; repeated here so this tree never depends on that).
+ */
+
+#include "t8142-j704-test-dcp.dts"
+
+/ {
+	model = "Apple MacBook Pro (14-inch, M5, 2025) [aurora test, nfsroot]";
+};
+
+&nvme {
+	status = "disabled";
+};
+
+&sart {
+	status = "disabled";
+};
+
+&ans_mbox {
+	status = "disabled";
+};

@@ -134,6 +134,7 @@ dtb-$(CONFIG_ARCH_APPLE) += t8142-j704.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j704-test.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j704-test-dcp.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j704-test-rootfs.dtb
+dtb-$(CONFIG_ARCH_APPLE) += t8142-j704-test-nfsroot.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j813.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8142-j815.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t8152-j873g.dtb
