@@ -133,6 +133,8 @@ pub(crate) static DIAG_NODE_LINKED: core::sync::atomic::AtomicU64 = core::sync::
 pub(crate) static DIAG_NODE_REARM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_REARM_LINKED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_SETTLE_WAITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(crate) static DIAG_RENDER_ADDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(crate) static DIAG_RENDER_REARM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_MIXED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 pub(crate) static DIAG_NODE_UNDRAINED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -283,6 +285,12 @@ impl WorkStorage {
             let completed = self.object.word(slot * NODE_STRIDE + 0xc)
                 .map_or(u32::MAX, |w| w.load(Ordering::Relaxed));
             let before = self.counts[slot];
+            if kicks == 2 {
+                DIAG_RENDER_ADDS.fetch_add(1, Relaxed);
+                if before != 0 && completed == before {
+                    DIAG_RENDER_REARM.fetch_add(1, Relaxed);
+                }
+            }
             if before != 0 && completed == before {
                 self.diag_rearmed[slot] = self.diag_rearmed[slot].saturating_add(1);
                 DIAG_NODE_REARM.fetch_add(1, Relaxed);
