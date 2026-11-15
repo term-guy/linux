@@ -146,6 +146,10 @@ module! {
             default: 1,
             description: "M5 experiment: provision this many times the computed private-memory pool blocks (1: as computed)",
         },
+        m5_pool_scale_which: u32 {
+            default: 3,
+            description: "M5 experiment: which pools m5_pool_scale applies to (bit 0 render, bit 1 compute)",
+        },
         m5_render_dep_class: u32 {
             default: 0,
             description: "M5 J813-forms experiment: 1..3 gives every render kick dependency that completion class (0: the driver's classes)",

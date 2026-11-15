@@ -218,6 +218,13 @@ impl StageScratch {
         intersection: IntersectionTables::NONE, auxiliary_allocation: 0 };
 }
 
+/// Experiment (`m5_pool_scale`, `m5_pool_scale_which`): the scale for render (`which` 1) or
+/// compute (`which` 2) private-memory pools; 1 when not selected.
+fn pool_scale(which: u32) -> u32 {
+    let selected = crate::module_parameters::m5_pool_scale_which.value();
+    if selected & which != 0 { crate::module_parameters::m5_pool_scale.value().max(1) } else { 1 }
+}
+
 impl M5Policy {
     pub(crate) fn new(id: &crate::regs::G17Id) -> Result<Self> {
         // Configured G17S context storage per enabled core. This is separate
@@ -268,7 +275,7 @@ impl M5Policy {
             .map_err(|_| EINVAL)?;
         let sizes = budget.sizes(request, History::default()).map_err(|_| EINVAL)?;
         Ok(Plan {
-            geometry: sizes.geometry().map_err(|_| EINVAL)?, sizes,
+            geometry: sizes.scaled_geometry(pool_scale(2)).map_err(|_| EINVAL)?, sizes,
             resource_flags: demand.resource_flags().map_err(|_| EINVAL)?,
             pressure: (demand.pressure() / active_kicks).clamp(96, 512),
             stages: None,
@@ -292,7 +299,7 @@ impl M5Policy {
         let sizes = budget.sizes(request, History::default())
             .map_err(|_| EINVAL)?;
         Ok(Plan {
-            geometry: sizes.geometry().map_err(|_| EINVAL)?, sizes,
+            geometry: sizes.scaled_geometry(pool_scale(1)).map_err(|_| EINVAL)?, sizes,
             resource_flags: demand.resource_flags().map_err(|_| EINVAL)?,
             pressure: demand.pressure(),
             stages: Some([stage(stage_demands[0], scs[0])?, stage(stage_demands[1], scs[1])?]),
