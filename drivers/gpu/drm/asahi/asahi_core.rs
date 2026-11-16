@@ -166,6 +166,54 @@ module! {
             default: 0,
             description: "G17 experiment: when a render retires, 1 always lets its idle free-list registration linger, 2 always releases it at once (0: linger only while another pair has work in flight)",
         },
+        m5_rc_off0: u32 {
+            default: 0,
+            description: "M5 experiment: offset of a region C word to override with m5_rc_val0 (0: none)",
+        },
+        m5_rc_val0: u32 {
+            default: 0,
+            description: "M5 experiment: the value for the region C word at m5_rc_off0",
+        },
+        m5_rc_off1: u32 {
+            default: 0,
+            description: "M5 experiment: offset of a region C word to override with m5_rc_val1 (0: none)",
+        },
+        m5_rc_val1: u32 {
+            default: 0,
+            description: "M5 experiment: the value for the region C word at m5_rc_off1",
+        },
+        m5_rc_off2: u32 {
+            default: 0,
+            description: "M5 experiment: offset of a region C word to override with m5_rc_val2 (0: none)",
+        },
+        m5_rc_val2: u32 {
+            default: 0,
+            description: "M5 experiment: the value for the region C word at m5_rc_off2",
+        },
+        m5_hw_off0: u32 {
+            default: 0,
+            description: "M5 experiment: offset of a hardware-data word to override with m5_hw_val0 (0: none)",
+        },
+        m5_hw_val0: u32 {
+            default: 0,
+            description: "M5 experiment: the value for the hardware-data word at m5_hw_off0",
+        },
+        m5_hw_off1: u32 {
+            default: 0,
+            description: "M5 experiment: offset of a hardware-data word to override with m5_hw_val1 (0: none)",
+        },
+        m5_hw_val1: u32 {
+            default: 0,
+            description: "M5 experiment: the value for the hardware-data word at m5_hw_off1",
+        },
+        m5_hw_off2: u32 {
+            default: 0,
+            description: "M5 experiment: offset of a hardware-data word to override with m5_hw_val2 (0: none)",
+        },
+        m5_hw_val2: u32 {
+            default: 0,
+            description: "M5 experiment: the value for the hardware-data word at m5_hw_off2",
+        },
         m5_idle_standby_us: u32 {
             default: 0,
             description: "M5 experiment: region C idle standby timer in us (0: the board's value)",

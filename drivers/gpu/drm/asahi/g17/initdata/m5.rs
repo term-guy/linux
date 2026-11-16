@@ -286,6 +286,24 @@ impl InitData {
             m::set_m5_region_idle_standby(self.object_mut(self.region_c)?.bytes_mut(), microseconds)
                 .map_err(|_| EINVAL)?;
         }
+        // Experiment (`m5_rc_off0..2`/`m5_rc_val0..2`): override single region C words
+        // (GPU_J704_TIMEOUT.md round 5).
+        {
+            use crate::module_parameters as p;
+            for (offset, value) in [
+                (p::m5_rc_off0.value(), p::m5_rc_val0.value()),
+                (p::m5_rc_off1.value(), p::m5_rc_val1.value()),
+                (p::m5_rc_off2.value(), p::m5_rc_val2.value()),
+            ] {
+                let offset = offset as usize;
+                if offset == 0 { continue; }
+                let bytes = self.object_mut(self.region_c)?.bytes_mut();
+                let old = bytes.get(offset..offset + 4).ok_or(EINVAL)?;
+                let old = u32::from_le_bytes([old[0], old[1], old[2], old[3]]);
+                bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                pr_warn!("G17: experiment: region C +{:#x}: {:#x} -> {:#x}\n", offset, old, value);
+            }
+        }
         for (index, role) in [m::InstanceRole::Primary, m::InstanceRole::Secondary].into_iter().enumerate() {
             let instance = m::InstanceAddresses {
                 root: ROOTS + index as u64 * 0x8000,
@@ -313,6 +331,29 @@ impl InitData {
         fence(Ordering::SeqCst);
         dev_info!(dev.as_ref(), "M5 firmware graph ready: private {:#x}+{:#x}, shared {:#x}+{:#x}\n",
             PRIVATE, private.total, BUNDLE, shared.total);
+        // Experiment (`m5_hw_off0..2`/`m5_hw_val0..2`): override single hardware-data words
+        // (the lockup-detection thresholds, GPU_J704_TIMEOUT.md round 5).
+        {
+            use crate::module_parameters as p;
+            for (offset, value) in [
+                (p::m5_hw_off0.value(), p::m5_hw_val0.value()),
+                (p::m5_hw_off1.value(), p::m5_hw_val1.value()),
+                (p::m5_hw_off2.value(), p::m5_hw_val2.value()),
+            ] {
+                let offset = offset as usize;
+                if offset == 0 { continue; }
+                let bytes = self.object_mut(self.bundle)?.bytes_mut();
+                let old = bytes.get(offset..offset + 4).ok_or(EINVAL)?;
+                let old = u32::from_le_bytes([old[0], old[1], old[2], old[3]]);
+                bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                pr_warn!("G17: experiment: hardware data +{:#x}: {:#x} -> {:#x}\n", offset, old, value);
+            }
+            let bytes = self.object(self.bundle)?.bytes();
+            let word = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            pr_warn!("G17: hardware data lockup words +0x27dc..0x27f0 {:x?} +0x2808 {:#x} +0x2810 {:#x}\n",
+                [word(0x27dc), word(0x27e0), word(0x27e4), word(0x27e8), word(0x27ec), word(0x27f0)],
+                word(0x2808), word(0x2810));
+        }
         Ok(())
     }
 }
