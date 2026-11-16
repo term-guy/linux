@@ -162,6 +162,10 @@ module! {
             default: 0,
             description: "M5 experiment: >0 keeps the GPU cores powered (idle control KeepPowered) until no work was submitted or in flight for this many ms (0: firmware idle policy)",
         },
+        m5_freelist_linger: u32 {
+            default: 0,
+            description: "G17 experiment: when a render retires, 1 always lets its idle free-list registration linger, 2 always releases it at once (0: linger only while another pair has work in flight)",
+        },
         m5_idle_standby_us: u32 {
             default: 0,
             description: "M5 experiment: region C idle standby timer in us (0: the board's value)",

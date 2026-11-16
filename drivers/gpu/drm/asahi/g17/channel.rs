@@ -323,6 +323,7 @@ impl Rings {
             init.control_asserts_gpu_power(record.opcode()),
             next,
         )?;
+        crate::g17::queue::render::diag_note_control(record.opcode() as u32);
         CONTROL_PUBLISHED.fetch_add(1, Ordering::AcqRel);
         observe_control(consumer, next);
         super::trace::message(super::trace::CONTROL, record.opcode() as u64);

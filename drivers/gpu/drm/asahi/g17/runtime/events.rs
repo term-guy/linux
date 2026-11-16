@@ -153,6 +153,8 @@ impl recovery::Memory for Service<'_> {
         if self.firmware.init.is_m5() {
             let registers = self.firmware.bridge.regs.m5_fault_registers();
             pr_err!("asahi: recovery fault registers: {:x?}\n", registers);
+            pr_err!("asahi: recovery fault window 0xc000: {:x?}\n",
+                self.firmware.bridge.regs.m5_fault_window());
             // MMU fault status: valid (bit 0), reason (1..3, 0 = unmapped), read
             // (4), level (7..8), requestor (9..16), VM slot (17..22); the address
             // word holds the faulting address shifted right by 6.

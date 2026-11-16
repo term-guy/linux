@@ -764,6 +764,14 @@ impl crate::g17::queue::render::Host for Host<'_> {
         let linger = queues.render.entries.iter().flatten().any(|entry| {
             entry.pair.as_ref().is_some_and(|pair| pair.published_in_flight())
         });
+        // Experiment (`m5_freelist_linger`, GPU_J704_TIMEOUT.md round 4): force the decision.
+        let linger = match crate::module_parameters::m5_freelist_linger.value() {
+            1 => true,
+            2 => false,
+            _ => linger,
+        };
+        crate::g17::queue::render::DIAG_LINGER[usize::from(linger)]
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let next = queues.render.pools.completed(pool_id, generation, linger)?;
         queues.buffers.can_release(buffer_id)?;
         if let Some(owners) = owners {

@@ -186,6 +186,20 @@ struct Active {
     published_cnt: u64,
 }
 
+/// Diagnostics: the last device-control records published: [opcode, time in GPU stamp ticks].
+static DIAG_CONTROLS: [[AtomicU64; 2]; 32] = [const { [AtomicU64::new(0), AtomicU64::new(0)] }; 32];
+static DIAG_CONTROL_NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// Now in the firmware stamps' base: 24 MHz ticks of the 1 GHz virtual counter.
+pub(crate) fn diag_gpu_now() -> u64 { (diag_cntvct() as u128 * 3 / 125) as u64 }
+
+pub(crate) fn diag_note_control(opcode: u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let index = (DIAG_CONTROL_NEXT.fetch_add(1, Relaxed) % 32) as usize;
+    DIAG_CONTROLS[index][1].store(diag_gpu_now(), Relaxed);
+    DIAG_CONTROLS[index][0].store(u64::from(opcode), Relaxed);
+}
+
 fn diag_cntvct() -> u64 {
     let value: u64;
     // SAFETY: Reading the virtual counter has no side effects.
@@ -228,6 +242,8 @@ pub(crate) static DIAG_PRIOR: [[AtomicU64; 4]; 2] = [
 pub(crate) static DIAG_LINK_BAD: AtomicU64 = AtomicU64::new(0);
 pub(crate) static DIAG_CTX_STALE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static DIAG_FORCED_SEEDS: AtomicU64 = AtomicU64::new(0);
+/// Render retirements that released their idle free-list registration at once [0] or let it linger [1].
+pub(crate) static DIAG_LINGER: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
 fn diag_rate(counter: &AtomicU64) -> bool {
     let n = counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
@@ -398,6 +414,8 @@ pub(crate) fn report_link_counters() {
         }
     }
     use core::sync::atomic::Ordering::Relaxed;
+    pr_warn!("G17: diag retirements [release at once, linger]={:?}\n",
+        DIAG_LINGER.each_ref().map(|c| c.load(Relaxed)));
     let prior = |s: usize| DIAG_PRIOR[s].each_ref().map(|c| c.load(Relaxed));
     pr_warn!("G17: diag counters published={} identity_updates={} prior ta[seeded,held_eq,held_ne,unknown]={:?} 3d={:?} link_bad={} ctx_stale={} forced_seeds={} node_reinit={} node_linked={} node_undrained={} node_rearm={} node_rearm_linked={} node_mixed={} settle_waits={} render_adds={} render_rearm={}\n",
         DIAG_PUBLISHED.load(Relaxed), DIAG_IDENTITY_UPDATES.load(Relaxed), prior(0), prior(1),
@@ -1851,6 +1869,17 @@ impl Pair {
                 ts[0], word, end, end.map(|end| ts[0].wrapping_sub(end) as i64),
                 ts[1].wrapping_sub(ts[0]) as i64, front.published_cnt,
                 ts[0].wrapping_sub(front.published_cnt) as i64, diag_cntvct());
+            // Device-control records published around the blamed TA: time relative to its end.
+            let total = DIAG_CONTROL_NEXT.load(Relaxed);
+            let mut list = [(0u32, 0i64); 32];
+            for (slot, entry) in list.iter_mut().zip(DIAG_CONTROLS.iter()) {
+                *slot = (entry[0].load(Relaxed) as u32,
+                    entry[1].load(Relaxed).wrapping_sub(ts[1]) as i64);
+            }
+            list.sort_unstable_by_key(|entry| entry.1);
+            pr_warn!("G17: diag controls total {} published {} ticks before the TA start, now {} after the TA end; last (opcode, ticks after the TA end): {:?}\n",
+                total, ts[0].wrapping_sub((front.published_cnt as u128 * 3 / 125) as u64) as i64,
+                diag_gpu_now().wrapping_sub(ts[1]) as i64, list);
         }
         let mut seen = [u32::MAX; 2];
         for active in self.active.iter() {

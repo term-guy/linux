@@ -692,6 +692,21 @@ impl G17Resources {
         ])
     }
 
+    /// Diagnostics: the whole 0xc000..0xc100 window around the fault words, read while the
+    /// firmware is halted for a recovery (GPU_J704_TIMEOUT.md round 4).
+    pub(crate) fn m5_fault_window(&self) -> Result<[u64; 32]> {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        let sgx = (&*sgx).as_view();
+        if sgx.relaxed().read32(G17_HOST_IRQ_SUMMARY) & G17_HOST_POWERED == 0 {
+            return Err(EAGAIN);
+        }
+        let mut words = [0; 32];
+        for (index, word) in words.iter_mut().enumerate() {
+            *word = sgx.try_read64(0xc000 + index * 8)?;
+        }
+        Ok(words)
+    }
+
     /// Sample only the two owned queue configuration words through the
     /// host tag/data port. The caller holds the device mutex and power hold.
     pub(crate) fn m5_queue_configurations(&self, qids: [u8; 2]) -> Result<[u64; 2]> {
