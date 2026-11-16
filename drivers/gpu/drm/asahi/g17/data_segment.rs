@@ -69,6 +69,27 @@ impl DataSegmentLog {
     }
 }
 
+/// Diagnostics (GPU_J704_TIMEOUT.md round 6): reads 64-bit words of the primary firmware's
+/// __DATA, which starts the `fw-data` region (firmware VA 0xfffffc0000050000, M5 26A428 c000).
+/// `offsets` are byte offsets from that VA; unaligned or out-of-range entries read as u64::MAX.
+pub(super) fn read_fw_words(dev: &device::Device, offsets: &[usize], out: &mut [u64]) -> Result {
+    let node = dev.of_node().ok_or(EINVAL)?;
+    let res = node.reserved_mem_region_to_resource_byname(c_str!("fw-data"))?;
+    let bytes: usize = res.size().try_into()?;
+    // SAFETY: The boot loader reserved this RAM for the loaded GPU firmware until reboot; it is
+    // only read here, never used for DMA.
+    let mem = unsafe { io::mem::Mem::try_new(res, io::mem::MemFlag::WB.into())? };
+    for (offset, word) in offsets.iter().zip(out.iter_mut()) {
+        *word = if offset % 8 == 0 && offset.checked_add(8).is_some_and(|end| end <= bytes) {
+            // SAFETY: Aligned and inside the mapping, which lives until the end of this function.
+            unsafe { core::ptr::read_volatile(mem.ptr().add(*offset) as *const u64) }
+        } else {
+            u64::MAX
+        };
+    }
+    Ok(())
+}
+
 #[kunit_tests(asahi_g17_crashlog_mapping)]
 mod tests {
     use super::*;

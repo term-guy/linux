@@ -201,6 +201,28 @@ impl recovery::Memory for Service<'_> {
         if let Ok(registers) = self.firmware.bridge.regs.m5_fault_registers() {
             pr_warn!("G17: recovery registers after state 3: {:x?}\n", registers);
         }
+        // PM OOM handler bookkeeping (interrupt bit 4 of 0x26238): 0x108f88 OOM count (low
+        // word), 0x107908 pending slot mask, 0x1078d8 interrupt mask, 0x107ac8 recovery event,
+        // 0x108000 discard mode, 0xbf900 count / 0xbf904, 0xbfdb0/0xbfdc0 slot bitmaps,
+        // 0xbfdd8 last-OOM time, 0x107c50, 0x107910.
+        const BASE: usize = 0xfffffc0000050000usize;
+        const VAS: [usize; 14] = [0xfffffc0000108f88, 0xfffffc0000107908, 0xfffffc00001078d8,
+            0xfffffc0000107ac8, 0xfffffc0000108000, 0xfffffc00000bf900, 0xfffffc00000bfdb0,
+            0xfffffc00000bfdb8, 0xfffffc00000bfdc0, 0xfffffc00000bfdc8, 0xfffffc00000bfdd8,
+            0xfffffc0000107c50, 0xfffffc0000107910, 0xfffffc0000108f80];
+        let mut offsets = [0usize; 14];
+        for (offset, va) in offsets.iter_mut().zip(VAS) {
+            *offset = va - BASE;
+        }
+        let mut words = [0u64; 14];
+        match crate::g17::data_segment::read_fw_words(
+            &self.firmware.primary.state.shared.dev, &offsets, &mut words)
+        {
+            Ok(()) => pr_warn!("G17: recovery fw pm-oom: count {:#x} pending {:#x} irqmask {:#x} event {:#x} mode {:#x} bf900 {:#x} maps [{:#x} {:#x} {:#x} {:#x}] last {:#x} c50 {:#x} 910 {:#x} f80 {:#x}\n",
+                words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7],
+                words[8], words[9], words[10], words[11], words[12], words[13]),
+            Err(error) => pr_warn!("G17: recovery fw pm-oom unreadable: {:?}\n", error),
+        }
     }
 }
 
