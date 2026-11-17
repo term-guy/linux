@@ -1042,11 +1042,15 @@ impl VmInner {
         // GPU uses outer-shareable invalidation and the barrier covers it.
         mem::sync();
         if contexts == 0 {
+            DIAG_TLB[4].fetch_add(1, Ordering::Relaxed);
             return;
         }
+        DIAG_TLB[2].fetch_add(1, Ordering::Relaxed);
         let no_peer = self.uat_inner.firmware.is_no_peer();
         for ctx in 0..UAT_NUM_CTX {
             if contexts & (1 << ctx) != 0 {
+                DIAG_TLB[3].fetch_add(1, Ordering::Relaxed);
+                DIAG_CTX[ctx][3].fetch_add(1, Ordering::Relaxed);
                 if no_peer {
                     mem::tlbi_range(ctx as u8, iova as usize, size);
                 } else {
@@ -1291,6 +1295,65 @@ impl ExecutionContext {
 static DIAG_UAT: core::sync::atomic::AtomicPtr<UatInner> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
+/// Diagnostics (GPU_J704_TIMEOUT.md round 7, stale-translation hypothesis): per TTBAT context
+/// [generation, ticks assigned, ticks the previous owner released it, invalidations issued for it
+/// since assignment, VM id, previous VM id, owner pid, previous owner pid, ticks last released].
+/// Ticks are the GPU stamps' 24 MHz base.
+static DIAG_CTX: [[AtomicU64; 9]; UAT_NUM_CTX] =
+    [const { [const { AtomicU64::new(0) }; 9] }; UAT_NUM_CTX];
+/// Diagnostics: context assignments, reuses (generation > 1), invalidation requests that named
+/// at least one context, per-context invalidations issued, requests skipped because no context
+/// named the root, ASID invalidations at assignment/release, experiment flushes.
+static DIAG_TLB: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+fn diag_ticks() -> u64 {
+    let value: u64;
+    // SAFETY: Reading the virtual counter has no side effects.
+    unsafe { core::arch::asm!("isb", "mrs {v}, cntvct_el0", v = out(reg) value, options(nomem, nostack)) };
+    (value as u128 * 3 / 125) as u64
+}
+
+/// Diagnostics: the identity words of context `id` ([`DIAG_CTX`]).
+pub(crate) fn diag_context_identity(id: usize) -> [u64; 9] {
+    DIAG_CTX.get(id).map_or([u64::MAX; 9], |words| words.each_ref().map(|w| w.load(Ordering::Relaxed)))
+}
+
+/// Diagnostics: records the pid of the client that took context `id`.
+pub(crate) fn diag_note_context_pid(id: usize, pid: u32) {
+    if let Some(words) = DIAG_CTX.get(id) {
+        words[6].store(u64::from(pid), Ordering::Relaxed);
+    }
+}
+
+/// Diagnostics: [`DIAG_TLB`].
+pub(crate) fn diag_tlb_counts() -> [u64; 7] {
+    DIAG_TLB.each_ref().map(|w| w.load(Ordering::Relaxed))
+}
+
+/// Experiment (`m5_vm_flush`): invalidates every translation of context `id` (synchronous: DSB
+/// before and after), or, with `id` None, the whole GPU TLB.
+pub(crate) fn diag_flush(id: Option<u8>) {
+    mem::sync();
+    match id {
+        Some(id) => {
+            mem::tlbi_asid(id);
+            if let Some(words) = DIAG_CTX.get(usize::from(id)) {
+                words[3].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        None => mem::tlbi_all(),
+    }
+    mem::sync();
+    DIAG_TLB[6].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Logs an experiment once.
+pub(crate) fn diag_log_once(flag: &core::sync::atomic::AtomicBool, args: core::fmt::Arguments<'_>) {
+    if !flag.swap(true, Ordering::Relaxed) {
+        pr_warn!("G17: experiment: {}\n", args);
+    }
+}
+
 /// Diagnostics: the TTBAT words and allocator state of context `id`.
 pub(crate) fn diag_report_context(id: usize, expected: Option<(u64, u64)>) {
     let pointer = DIAG_UAT.load(Ordering::Acquire);
@@ -1344,6 +1407,8 @@ impl ExecutionRoot {
             mem::sync();
             mem::tlbi_asid(self.id);
             mem::sync();
+            DIAG_TLB[5].fetch_add(1, Ordering::Relaxed);
+            DIAG_CTX[id][8].store(diag_ticks(), Ordering::Relaxed);
             let mut inner = self.inner.lock();
             inner.context_clock += 1;
             inner.context_returns[id] = inner.context_clock;
@@ -3987,6 +4052,32 @@ impl Uat {
         mem::sync();
         mem::tlbi_asid(id as u8);
         mem::sync();
+        {
+            let words = &DIAG_CTX[id];
+            let previous = [words[4].load(Ordering::Relaxed), words[6].load(Ordering::Relaxed),
+                words[8].load(Ordering::Relaxed)];
+            words[0].store(u64::from(generation), Ordering::Relaxed);
+            words[1].store(diag_ticks(), Ordering::Relaxed);
+            words[2].store(previous[2], Ordering::Relaxed);
+            words[3].store(1, Ordering::Relaxed);
+            words[5].store(previous[0], Ordering::Relaxed);
+            words[4].store(vm.id, Ordering::Relaxed);
+            words[7].store(previous[1], Ordering::Relaxed);
+            words[6].store(0, Ordering::Relaxed);
+            DIAG_TLB[0].fetch_add(1, Ordering::Relaxed);
+            if generation > 1 {
+                DIAG_TLB[1].fetch_add(1, Ordering::Relaxed);
+            }
+            DIAG_TLB[5].fetch_add(1, Ordering::Relaxed);
+        }
+        // Experiment (`m5_vm_flush`, off by default): the whole GPU TLB at every assignment.
+        if self.m5 && module_parameters::m5_vm_flush.value() != 0 {
+            static LOGGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+            diag_log_once(&LOGGED, format_args!("m5_vm_flush {}: full TLB invalidation at context assignment and new render pairs{}",
+                module_parameters::m5_vm_flush.value(),
+                if module_parameters::m5_vm_flush.value() >= 2 { ", context ASID before every render publication" } else { "" }));
+            diag_flush(None);
+        }
         Ok(context)
     }
 
@@ -4014,6 +4105,13 @@ impl Uat {
     /// Marks a published-roots UAT as an M5 GPU's ([`Uat::is_m5`]).
     pub(crate) fn with_m5(mut self) -> Self {
         self.m5 = true;
+        // Experiment (`m5_page_tlbi`, off by default): range invalidations page by page
+        // (`tlbi vae1os` per 16 KiB page, by ASID above 2048 pages) instead of one
+        // `tlbi rvae1os` range operation, as the M4 Pro/Max quirk does.
+        if module_parameters::m5_page_tlbi.value() != 0 {
+            mem::set_page_tlbi(true);
+            pr_warn!("G17: experiment: m5_page_tlbi: GPU TLB ranges invalidated page by page\n");
+        }
         self
     }
 

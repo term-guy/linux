@@ -459,6 +459,46 @@ impl Tvb {
     pub(crate) fn blocks(&self) -> usize {
         self.addresses.len()
     }
+    /// Diagnostics: blocks in a backing object of `bytes` bytes.
+    fn diag_object_blocks(&self, bytes: usize) -> usize {
+        let geometry = self.geometry;
+        if geometry == BlockGeometry::NEO || geometry.backing_stride == 0 {
+            return bytes / cfg::TVB_BLOCK_SIZE;
+        }
+        bytes.checked_sub(geometry.block_bytes).map_or(0, |rest| rest / geometry.backing_stride + 1)
+    }
+    /// Diagnostics: the driver's CPU view of up to `len` bytes at GPU address `va` when it lies
+    /// in one of the blocks, with the block's index. Torn reads; never maps anything.
+    pub(crate) fn diag_view(&self, va: u64, len: usize) -> Option<(usize, &[u8])> {
+        let geometry = self.geometry;
+        let neo = geometry == BlockGeometry::NEO;
+        let (block_bytes, stride) = if neo { (cfg::TVB_BLOCK_SIZE, cfg::TVB_BLOCK_SIZE) }
+            else { (geometry.block_bytes, geometry.backing_stride) };
+        let index = self.addresses.iter()
+            .position(|&start| va >= start && va - start < block_bytes as u64)?;
+        let within = (va - self.addresses[index]) as usize;
+        let len = len.min(block_bytes - within);
+        let extension_blocks: usize = self.extensions.iter()
+            .map(|extension| self.diag_object_blocks(extension.size())).sum();
+        let primary = self.blocks().saturating_sub(extension_blocks);
+        let (object, relative) = if index < primary {
+            (&self._primary, index)
+        } else {
+            let mut relative = index - primary;
+            let mut found = None;
+            for extension in self.extensions.iter() {
+                let blocks = self.diag_object_blocks(extension.size());
+                if relative < blocks {
+                    found = Some((extension, relative));
+                    break;
+                }
+                relative -= blocks;
+            }
+            found?
+        };
+        let start = relative.checked_mul(stride)?.checked_add(within)?;
+        Some((index, object.bytes().get(start..start.checked_add(len)?)?))
+    }
     pub(crate) fn addresses(&self) -> &[u64] {
         &self.addresses
     }
@@ -875,6 +915,45 @@ impl Manager {
             read(self.layout.control + core::mem::offset_of!(fw::Control, max_pages)),
             read(self.layout.control + core::mem::offset_of!(fw::Control, reset)),
             self.initialized);
+    }
+    /// Diagnostics: the CPU view of up to `len` bytes of the graph object at GPU address `va`.
+    pub(crate) fn diag_graph_view(&self, va: u64, len: usize) -> Option<&[u8]> {
+        let start = usize::try_from(va.checked_sub(self.graph.gpu_va())?).ok()?;
+        let end = start.checked_add(len)?.min(self.graph.size());
+        self.graph.bytes().get(start..end)
+    }
+    /// Diagnostics: state pages, block capacity, producer, consumer, last page, and the control
+    /// words total, committed, read (u64::MAX: unreadable).
+    pub(crate) fn diag_pb_cursors(&self) -> [u64; 8] {
+        let read = |offset: usize| self.graph.word(offset).map_or(u64::MAX, |w| u64::from(w.load(Ordering::Relaxed)));
+        [read(core::mem::offset_of!(fw::State, pages)),
+            read(core::mem::offset_of!(fw::State, block_capacity)),
+            read(core::mem::offset_of!(fw::State, producer)),
+            read(core::mem::offset_of!(fw::State, consumer)),
+            read(core::mem::offset_of!(fw::State, last_page)),
+            read(self.layout.control), read(self.layout.control + 4), read(self.layout.control + 8)]
+    }
+    /// Diagnostics: entry `index` of the page list (a compact page number), and its GPU address.
+    pub(crate) fn diag_page(&self, index: usize) -> Option<(u32, u64)> {
+        let page = self.graph.word(self.layout.pages.checked_add(index.checked_mul(4)?)?).ok()?
+            .load(Ordering::Relaxed);
+        Some((page, self.tvb.geometry.base + u64::from(page) * BlockGeometry::PAGE as u64))
+    }
+    /// Diagnostics: the CPU view of up to `len` bytes of a TVB block at `va`, with its index.
+    pub(crate) fn diag_tvb_view(&self, va: u64, len: usize) -> Option<(usize, &[u8])> {
+        self.tvb.diag_view(va, len)
+    }
+    /// Diagnostics: buffer id, generation, blocks, extensions, pages, initialized, scene of
+    /// `ordinal` (u64::MAX: none), first and last block address, geometry base and block bytes.
+    pub(crate) fn diag_tvb_info(&self, ordinal: u64) -> [u64; 11] {
+        let scene = self.scenes.owners.iter().flatten().find(|(owner, _)| *owner == ordinal)
+            .map_or(u64::MAX, |(_, scene)| u64::from(*scene));
+        let addresses = self.tvb.addresses();
+        [u64::from(self.buffer_id), self.generation, self.blocks() as u64,
+            self.tvb.extensions.len() as u64, self.page_count().map_or(u64::MAX, u64::from),
+            u64::from(self.initialized), scene, addresses.first().copied().unwrap_or(0),
+            addresses.last().copied().unwrap_or(0), self.tvb.geometry.base,
+            self.tvb.geometry.block_bytes as u64]
     }
     pub(crate) fn state_va(&self) -> u64 {
         self.graph.gpu_va()

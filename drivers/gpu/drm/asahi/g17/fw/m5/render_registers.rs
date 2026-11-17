@@ -492,6 +492,8 @@ pub(crate) struct Workspace {
     // are write-combined and must not be used for header read/modify/write.
     pub(crate) encoded_ta: [u8; super::render::M5_TA_COMMAND_BYTES],
     pub(crate) encoded_fragment: [u8; super::render::M5_3D_COMMAND_BYTES],
+    /// Diagnostics: the final fragment tile flags of the last `write`.
+    pub(crate) diag_fragment_tile_flags: u64,
 }
 // SAFETY: Every field consists only of integer storage.
 unsafe impl Zeroable for Workspace {}
@@ -554,6 +556,7 @@ impl Workspace {
         self.ta.set_lifecycle((u64::from(inputs.ta.predecessor_id) << 32) | u64::from(inputs.ta.completion.key as u32));
         c.fragment_tile_flags = (c.fragment_tile_flags & !0x7ffff) | 0x36011
             | (u64::from(inputs.fragment.empty_tile_flags[3] & 1) << 18);
+        self.diag_fragment_tile_flags = c.fragment_tile_flags;
         let j813 = c.board.j813_forms();
         if j813 {
             // macOS 27.0's J813 fragment program writes 0xa741 = 0 at entry.

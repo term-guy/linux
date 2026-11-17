@@ -171,7 +171,8 @@ impl Layout {
     }
     pub(crate) fn tpc_capacity(&self) -> Result<usize> {
         if let Some((slices, _)) = self.m5 {
-            return aligned(slices.bytes, mmu::UAT_PGSZ);
+            let bytes = aligned(slices.bytes, mmu::UAT_PGSZ)?;
+            return Ok(if tpc_slot_mode(self) { bytes.max(TPC_SLOT_STRIDE * DEPTH) } else { bytes });
         }
         // TPC_MAX bounds the tail-pointer cache itself. On 25G83 this object
         // also contains GTP sub-buffers, notably 64 times the tile map. Applying
@@ -195,7 +196,54 @@ struct Object {
     address: u64,
     _mapping: mmu::KernelMapping,
     backing: KernelObject,
+    /// Diagnostics: allocation sequence number (all pairs' target objects).
+    seq: u64,
 }
+
+/// Diagnostics: prepares refused because the slot's previous owner was still active,
+/// prepares of an ordinal that already owned its slot, and slots whose word +0 was nonzero
+/// before the clear.
+static DIAG_PREPARE: [core::sync::atomic::AtomicU64; 3] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+pub(crate) fn diag_prepare_counts() -> [u64; 3] {
+    DIAG_PREPARE.each_ref().map(|w| w.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// Diagnostics: target objects created, and the last eight dropped as (address, size, seq,
+/// GPU stamp time), to see whether a live record's GPU address reuses a dropped one's.
+static DIAG_OBJECT_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DIAG_DROPPED: [[core::sync::atomic::AtomicU64; 4]; 8] =
+    [const { [const { core::sync::atomic::AtomicU64::new(0) }; 4] }; 8];
+static DIAG_DROP_NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+impl Drop for Object {
+    fn drop(&mut self) {
+        use core::sync::atomic::Ordering::Relaxed;
+        let entry = &DIAG_DROPPED[(DIAG_DROP_NEXT.fetch_add(1, Relaxed) % 8) as usize];
+        entry[0].store(self.address, Relaxed);
+        entry[1].store(self.backing.size() as u64, Relaxed);
+        entry[2].store(self.seq, Relaxed);
+        entry[3].store(crate::g17::queue::render::diag_gpu_now(), Relaxed);
+    }
+}
+
+/// Diagnostics: target objects dropped so far, and among the last eight the most recent one
+/// whose GPU range contains `va`, as (address, size, seq, GPU stamp time).
+pub(crate) fn diag_dropped_containing(va: u64) -> (u64, Option<[u64; 4]>) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let total = DIAG_DROP_NEXT.load(Relaxed);
+    let mut best: Option<[u64; 4]> = None;
+    for entry in DIAG_DROPPED.iter() {
+        let words = [0, 1, 2, 3].map(|index| entry[index].load(Relaxed));
+        if words[1] != 0 && va >= words[0] && va - words[0] < words[1]
+            && best.is_none_or(|known| words[3] > known[3])
+        {
+            best = Some(words);
+        }
+    }
+    (total, best)
+}
+
 impl Object {
     fn new(dev: &AsahiDrmDevice, vm: &mmu::Vm, size: usize, m5: bool) -> Result<Self> {
         let backing = KernelObject::backing(dev, size, CpuMap::WriteCombined)?;
@@ -210,12 +258,15 @@ impl Object {
             address: mapping.iova(),
             _mapping: mapping,
             backing,
+            seq: DIAG_OBJECT_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1,
         })
     }
 }
 struct Retired {
     _object: Object,
     owners: [Option<u64>; DEPTH],
+    /// Diagnostics: the record stride of a replaced record object, 0 for a replaced TPC.
+    stride: usize,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -223,6 +274,17 @@ pub(crate) struct Addresses {
     pub(crate) tilemap: u64,
     pub(crate) layer: u64,
     pub(crate) heap: u64,
+    /// The TPC the TA uses: the TPC object, or its slot slice with `m5_tpc_slot`.
+    pub(crate) tpc: u64,
+}
+
+/// Experiment (`m5_tpc_slot`, GPU_J704_TIMEOUT.md round 7): per record slot a TPC slice of this
+/// stride, zeroed at prepare. Only for M5 layouts whose TPC object holds the TPC alone.
+const TPC_SLOT_STRIDE: usize = 0x8000;
+fn tpc_slot_mode(layout: &Layout) -> bool {
+    crate::module_parameters::m5_tpc_slot.value() != 0
+        && layout.m5.is_some_and(|(slices, _)| slices.sizes[1..].iter().all(|&size| size == 0)
+            && slices.offsets[0] == 0 && slices.sizes[0] <= TPC_SLOT_STRIDE)
 }
 
 pub(crate) struct Target {
@@ -232,6 +294,18 @@ pub(crate) struct Target {
     slots: [Option<u64>; DEPTH],
     retired: KVec<Retired>,
     m5: bool,
+    /// Diagnostics: per slot, the ordinal and GPU stamp time of its last clear by `prepare`.
+    cleared: [(u64, u64); DEPTH],
+    /// Diagnostics: per slot, word +0 before the last clear and the ordinal cleared before it.
+    clear_old: [(u64, u64); DEPTH],
+    /// Per slot: the span the last prepare cleared, and (experiment 3) the span already cleared
+    /// at its owner's retirement.
+    spans: [usize; DEPTH],
+    precleared: [usize; DEPTH],
+    /// Diagnostics: record-object replacements (growth) and the newest ordinal owning a slot
+    /// when the last one happened (u64::MAX: none).
+    replaced: u64,
+    replaced_at: u64,
 }
 impl Target {
     /// Keep this allocation frame separate from the rest of the render graph.
@@ -251,6 +325,12 @@ impl Target {
                 slots: [None; DEPTH],
                 retired: KVec::new(),
                 m5,
+                cleared: [(u64::MAX, 0); DEPTH],
+                clear_old: [(0, u64::MAX); DEPTH],
+                spans: [0; DEPTH],
+                precleared: [0; DEPTH],
+                replaced: 0,
+                replaced_at: u64::MAX,
             },
             GFP_KERNEL,
         )
@@ -258,6 +338,79 @@ impl Target {
     }
     pub(crate) fn tpc_va(&self) -> u64 {
         self.tpc.address
+    }
+
+    /// Diagnostics: the CPU view of up to `len` bytes at GPU address `va` in the current or a
+    /// retained record or TPC object. Torn reads of firmware-written memory; never maps anything.
+    pub(crate) fn diag_view(&self, va: u64, len: usize) -> Option<&[u8]> {
+        let objects = Iterator::chain([&self.records, &self.tpc].into_iter(),
+            self.retired.iter().map(|retired| &retired._object));
+        for object in objects {
+            let Some(start) = va.checked_sub(object.address) else { continue };
+            let Ok(start) = usize::try_from(start) else { continue };
+            let bytes = object.backing.bytes();
+            if start < bytes.len() {
+                return bytes.get(start..start.saturating_add(len).min(bytes.len()));
+            }
+        }
+        None
+    }
+    /// Diagnostics: the record object's seq, GPU address and size, the replacement count and the
+    /// ordinal of the last one, the TPC object's seq, and the dropped-object total with the most
+    /// recent dropped object whose range contains `va` (seq, GPU stamp time; 0 when none).
+    pub(crate) fn diag_identity(&self, va: u64) -> [u64; 9] {
+        let (dropped, containing) = diag_dropped_containing(va);
+        let containing = containing.unwrap_or([0; 4]);
+        [self.records.seq, self.records.address, self.records.backing.size() as u64,
+            self.replaced, self.replaced_at, self.tpc.seq, dropped, containing[2], containing[3]]
+    }
+    /// Diagnostics: for each retained replaced record object, its seq and address and the first
+    /// 0x10 bytes of `ordinal`'s slot in it.
+    pub(crate) fn diag_old_records(&self, ordinal: u64, mut each: impl FnMut(usize, u64, u64, &[u8])) {
+        for (index, retired) in self.retired.iter().enumerate().filter(|(_, r)| r.stride != 0) {
+            let start = (ordinal as usize % DEPTH) * retired.stride;
+            let bytes = retired._object.backing.bytes();
+            each(index, retired._object.seq, retired._object.address + start as u64,
+                bytes.get(start..start + 0x10).unwrap_or(&[]));
+        }
+    }
+    /// Diagnostics (round 7): every slot of the current record object: (slot, owner ordinal or
+    /// u64::MAX, ordinal of its last clear, word +0, word +0x1000). Torn reads.
+    pub(crate) fn diag_all_slots(&self, mut each: impl FnMut(usize, u64, u64, u64, u64)) {
+        let bytes = self.records.backing.bytes();
+        let word = |at: usize| bytes.get(at..at + 8)
+            .map_or(u64::MAX, |b| u64::from_le_bytes(b.try_into().unwrap_or([0xff; 8])));
+        for slot in 0..DEPTH {
+            let base = slot * self.stride;
+            each(slot, self.slots[slot].unwrap_or(u64::MAX), self.cleared[slot].0, word(base),
+                word(base + 0x1000));
+        }
+    }
+    /// Diagnostics: the owner ordinal of `ordinal`'s record slot (u64::MAX: none), the record
+    /// stride, the number of retained replaced objects, and the ordinal and GPU stamp time of
+    /// the slot's last clear.
+    pub(crate) fn diag_slot(&self, ordinal: u64) -> [u64; 7] {
+        let slot = ordinal as usize % DEPTH;
+        [self.slots[slot].unwrap_or(u64::MAX), self.stride as u64, self.retired.len() as u64,
+            self.cleared[slot].0, self.cleared[slot].1, self.clear_old[slot].0,
+            self.clear_old[slot].1]
+    }
+    /// The ordinal whose clear preceded the one about to be recorded for `slot`.
+    fn cleared_prev_owner(&self, slot: usize) -> u64 {
+        self.cleared[slot].0
+    }
+    /// Experiment: completes the clear's stores (`dsb sy`) and reads the first and last words back.
+    fn diag_barrier_readback(bytes: &mut [u8]) {
+        // SAFETY: A barrier has no other effect.
+        unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+        let len = bytes.len();
+        if len >= 8 {
+            // SAFETY: Both reads are in bounds of the slice; volatile keeps them.
+            unsafe {
+                core::ptr::read_volatile(bytes.as_ptr().cast::<u64>());
+                core::ptr::read_volatile(bytes.as_ptr().add(len - 8).cast::<u64>());
+            }
+        }
     }
 
     /// The M5 tiling words naming the TPC object's slices of `layout`.
@@ -299,29 +452,68 @@ impl Target {
     /// Only the span consumed by this render is cleared. A small render does
     /// not clear a previous large target's complete retained record capacity.
     pub(crate) fn prepare(&mut self, ordinal: u64, layout: &Layout) -> Result<Addresses> {
+        use core::sync::atomic::Ordering::Relaxed;
         let slot = ordinal as usize % DEPTH;
         if self.m5 != layout.m5.is_some() { return Err(EINVAL); }
         if self.slots[slot].is_some_and(|owner| owner != ordinal) {
+            DIAG_PREPARE[0].fetch_add(1, Relaxed);
             return Err(EBUSY);
+        }
+        if self.slots[slot] == Some(ordinal) {
+            DIAG_PREPARE[1].fetch_add(1, Relaxed);
         }
         if layout.used > self.stride {
             return Err(ERANGE);
         }
         let offset = slot * self.stride;
         let span = aligned(layout.used, mmu::UAT_PGSZ)?.min(self.stride);
-        self.records
-            .backing
-            .bytes_mut()
-            .get_mut(offset..offset + span)
-            .ok_or(ERANGE)?
-            .fill(0);
+        let bytes = self.records.backing.bytes_mut().get_mut(offset..offset + span).ok_or(ERANGE)?;
+        // Diagnostics: the slot's word +0 before this clear.
+        let old = bytes.get(..8).map_or(u64::MAX, |b| u64::from_le_bytes(b.try_into().unwrap_or([0xff; 8])));
+        if old != 0 {
+            DIAG_PREPARE[2].fetch_add(1, Relaxed);
+        }
+        // Experiment (`m5_target_clear`, off by default; GPU_J704_TIMEOUT.md round 7).
+        let mode = crate::module_parameters::m5_target_clear.value();
+        if self.m5 && mode != 0 {
+            static LOGGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+            crate::mmu::diag_log_once(&LOGGED, format_args!("m5_target_clear {}: {}", mode, match mode {
+                1 => "target record clear followed by dsb sy and a readback",
+                2 => "mode 2 removed (it preserved stale tile pointers): cleared as usual",
+                _ => "target record cleared at its owner's retirement, with dsb sy",
+            }));
+        }
+        match mode {
+            3 if self.m5 && self.precleared[slot] >= span => {}
+            _ => bytes.fill(0),
+        }
+        if self.m5 && (mode == 1 || mode == 3) {
+            Self::diag_barrier_readback(bytes);
+        }
+        self.precleared[slot] = 0;
+        let previous_clear = self.cleared_prev_owner(slot);
+        self.cleared[slot] = (ordinal, crate::g17::queue::render::diag_gpu_now());
+        self.clear_old[slot] = (old, previous_clear);
+        self.spans[slot] = span;
         self.slots[slot] = Some(ordinal);
         let tilemap = self
             .records
             .address
             .checked_add(offset as u64)
             .ok_or(EOVERFLOW)?;
+        let mut tpc = self.tpc.address;
+        if tpc_slot_mode(layout) && self.tpc.backing.size() >= TPC_SLOT_STRIDE * DEPTH {
+            static LOGGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+            crate::mmu::diag_log_once(&LOGGED, format_args!(
+                "m5_tpc_slot: every record slot has its own TPC slice, zeroed at prepare"));
+            let start = slot * TPC_SLOT_STRIDE;
+            let size = layout.m5.map_or(0, |(slices, _)| slices.sizes[0]);
+            self.tpc.backing.bytes_mut().get_mut(start..start + size).ok_or(ERANGE)?.fill(0);
+            Self::diag_barrier_readback(&mut self.tpc.backing.bytes_mut()[start..start + size]);
+            tpc = tpc.checked_add(start as u64).ok_or(EOVERFLOW)?;
+        }
         Ok(Addresses {
+            tpc,
             tilemap,
             layer: tilemap
                 .checked_add(layout.layer_offset as u64)
@@ -347,7 +539,7 @@ impl Target {
         layout.check_capacity(stride)?;
         let mut grew = false;
         if tpc > self.tpc.backing.size() {
-            Self::replace(&mut self.retired, &mut self.tpc, dev, vm, tpc, owners, self.m5)?;
+            Self::replace(&mut self.retired, &mut self.tpc, dev, vm, tpc, owners, self.m5, 0)?;
             grew = true;
         }
         if stride > self.stride {
@@ -359,9 +551,13 @@ impl Target {
                 stride * DEPTH,
                 owners,
                 self.m5,
+                self.stride,
             )?;
+            self.replaced += 1;
+            self.replaced_at = owners.iter().flatten().copied().max().unwrap_or(u64::MAX);
             self.stride = stride;
             self.slots = [None; DEPTH];
+            self.precleared = [0; DEPTH];
             grew = true;
         }
         Ok(grew)
@@ -374,6 +570,7 @@ impl Target {
         size: usize,
         owners: &[Option<u64>; DEPTH],
         m5: bool,
+        stride: usize,
     ) -> Result {
         let retain = owners.iter().any(Option::is_some);
         if retain {
@@ -387,13 +584,26 @@ impl Target {
                 Retired {
                     _object: previous,
                     owners: *owners,
+                    stride,
                 },
             );
         }
         Ok(())
     }
     pub(crate) fn retire(&mut self, ordinal: u64) -> Result {
-        let slot = &mut self.slots[ordinal as usize % DEPTH];
+        let index = ordinal as usize % DEPTH;
+        // Experiment (`m5_target_clear` 3): clear the record now that its owner completed.
+        if self.m5 && crate::module_parameters::m5_target_clear.value() == 3
+            && self.slots[index] == Some(ordinal)
+        {
+            let (offset, span) = (index * self.stride, self.spans[index]);
+            if let Some(bytes) = self.records.backing.bytes_mut().get_mut(offset..offset + span) {
+                bytes.fill(0);
+                Self::diag_barrier_readback(bytes);
+                self.precleared[index] = span;
+            }
+        }
+        let slot = &mut self.slots[index];
         if *slot == Some(ordinal) {
             *slot = None;
         }

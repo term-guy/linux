@@ -707,6 +707,50 @@ impl G17Resources {
         Ok(words)
     }
 
+    /// Diagnostics (round 7): 0xc100..0xc200 at a recovery. The firmware's lockup check
+    /// (26A428 0x29c38) reads the slots per engine at 0xc160 (TA), 0xc168 (3D), 0xc170 (compute),
+    /// the expired hardware lockup timers at 0xc1e0 and the progress mask at 0xc1e8.
+    pub(crate) fn m5_engine_window(&self) -> Result<[u64; 32]> {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        let sgx = (&*sgx).as_view();
+        if sgx.relaxed().read32(G17_HOST_IRQ_SUMMARY) & G17_HOST_POWERED == 0 {
+            return Err(EAGAIN);
+        }
+        let mut words = [0; 32];
+        for (index, word) in words.iter_mut().enumerate() {
+            *word = sgx.try_read64(0xc100 + index * 8)?;
+        }
+        Ok(words)
+    }
+
+    /// Diagnostics (GPU_J704_TIMEOUT.md round 7): the registers the firmware's lockup progress
+    /// check compares (26A428 0x79b0, tables at 0x48948), read through the host tag port as the
+    /// firmware reads them through its own: the per-slot instance word 0xc020 of all 16 slots,
+    /// then for instance 0 the TA words (0x1678, 0x1c0e0, USC_VDM_SERV), the 3D words (0x1668,
+    /// 0x13020, 0x15108, USC_PDM_SERV) and the compute words (0x1688, USC_CDM_SERV), and 0xc120.
+    /// Only for use while the firmware is halted for a recovery.
+    pub(crate) fn m5_progress_registers(&self) -> Result<[u64; 26]> {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        let sgx = (&*sgx).as_view();
+        if sgx.relaxed().read32(G17_HOST_IRQ_SUMMARY) & G17_HOST_POWERED == 0 {
+            return Err(EAGAIN);
+        }
+        const PIPE: u64 = (3 << 40) | (1 << 43);
+        const TAGS: [u64; 9] = [0x1678, 0x1c0e0, 0xa088 | PIPE, 0x1668, 0x13020 | PIPE,
+            0x15108 | PIPE, 0xa068 | PIPE, 0x1688, 0xa0a8 | PIPE];
+        let mut words = [0; 26];
+        for slot in 0..16u64 {
+            sgx.try_write64(0xc020 | (0x800 << 32) | (slot << 44), 0x4090)?;
+            words[slot as usize] = sgx.try_read64(0x4098)?;
+        }
+        for (word, tag) in words[16..25].iter_mut().zip(TAGS) {
+            sgx.try_write64(tag, 0x4090)?;
+            *word = sgx.try_read64(0x4098)?;
+        }
+        words[25] = sgx.try_read64(0xc120)?;
+        Ok(words)
+    }
+
     /// Sample only the two owned queue configuration words through the
     /// host tag/data port. The caller holds the device mutex and power hold.
     pub(crate) fn m5_queue_configurations(&self, qids: [u8; 2]) -> Result<[u64; 2]> {

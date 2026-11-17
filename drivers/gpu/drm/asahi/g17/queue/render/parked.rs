@@ -291,6 +291,7 @@ impl ParkedPair {
             drain_failures: 0,
             retired_ring: [([0; 2], [0; 2], [0; 4]); 4],
             retired_next: 0,
+            shape_ring: super::shape::Ring::new(),
             drain_retry_at: 0,
             channel_error: false,
         }))

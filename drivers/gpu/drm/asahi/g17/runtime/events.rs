@@ -129,6 +129,54 @@ impl event::Queues for Service<'_> {
     }
 }
 
+impl Service<'_> {
+    /// Diagnostics (GPU_J704_TIMEOUT.md round 7): the firmware's stored lockup progress snapshot
+    /// (26A428 c000, 0x79b0): per slot the last values of the TA words (0xb4540, 3 per slot:
+    /// 0x1678, 0x1c0e0, USC_VDM_SERV), the 3D words (0xb49c0, 5 per slot: 0x1668, 0x13020,
+    /// 0x15108, USC_PDM_SERV) and the compute words (0xb4c40, 2 per slot: 0x1688, USC_CDM_SERV),
+    /// and the per-engine check stamps (0xb44c0) with the tick words 0xb4e18 and 0xb4e30.
+    /// Slots never sampled read all ones and are not printed.
+    fn m5_progress_snapshot(&self) {
+        const BASE: usize = 0x50000;
+        let dev = &self.firmware.primary.state.shared.dev;
+        // Then the lockup thresholds 0x107f78 (3D, TA), 0x107f80 (compute, -) and the mode
+        // word 0x107f88, and the per-slot last kick (0x107b90) and tick counter (0x107c10) pairs.
+        let mut head = [0u64; 8];
+        let offsets = [0xb44c0 - BASE, 0xb44c8 - BASE, 0xb44d0 - BASE, 0xb4e18 - BASE, 0xb4e30 - BASE,
+            0x107f78 - BASE, 0x107f80 - BASE, 0x107f88 - BASE];
+        match crate::g17::data_segment::read_fw_words(dev, &offsets, &mut head) {
+            Ok(()) => pr_err!("asahi: recovery fw progress stamps: {:x?}\n", head),
+            Err(error) => {
+                pr_err!("asahi: recovery fw progress unreadable: {:?}\n", error);
+                return;
+            }
+        }
+        let mut kicks = [0u64; 24];
+        let mut offsets = [0usize; 24];
+        for (index, offset) in offsets.iter_mut().enumerate() {
+            *offset = 0x107b90 - BASE + index * 8;
+        }
+        if crate::g17::data_segment::read_fw_words(dev, &offsets, &mut kicks).is_ok() {
+            pr_err!("asahi: recovery fw lockup kicks: {:x?} counters: {:x?}\n", &kicks[..16], &kicks[16..]);
+        }
+        for (name, table, count) in [("ta", 0xb4540usize, 3usize), ("3d", 0xb49c0, 5), ("cp", 0xb4c40, 2)] {
+            for slot in 0..16 {
+                let mut offsets = [0usize; 5];
+                let mut words = [0u64; 5];
+                for (index, offset) in offsets[..count].iter_mut().enumerate() {
+                    *offset = table - BASE + (slot * count + index) * 8;
+                }
+                if crate::g17::data_segment::read_fw_words(dev, &offsets[..count], &mut words[..count]).is_err() {
+                    return;
+                }
+                if words[..count].iter().any(|&word| word != u64::MAX && word != 0) {
+                    pr_err!("asahi: recovery fw progress {} slot {}: {:x?}\n", name, slot, &words[..count]);
+                }
+            }
+        }
+    }
+}
+
 impl recovery::Host for Service<'_> {
     fn recovery(&self) -> &recovery::State {
         &self.firmware.recovery
@@ -152,9 +200,19 @@ impl recovery::Memory for Service<'_> {
         let mut mmu_fault = false;
         if self.firmware.init.is_m5() {
             let registers = self.firmware.bridge.regs.m5_fault_registers();
+            crate::g17::queue::render::shape::FAULT_KICK.store(
+                registers.as_ref().map_or(u64::MAX, |words| words[3]),
+                core::sync::atomic::Ordering::Relaxed);
             pr_err!("asahi: recovery fault registers: {:x?}\n", registers);
             pr_err!("asahi: recovery fault window 0xc000: {:x?}\n",
                 self.firmware.bridge.regs.m5_fault_window());
+            pr_err!("asahi: recovery engine window 0xc100: {:x?}\n",
+                self.firmware.bridge.regs.m5_engine_window());
+            self.m5_progress_snapshot();
+            if crate::module_parameters::m5_diag_progress.value() != 0 {
+                pr_err!("asahi: recovery progress registers: {:x?}\n",
+                    self.firmware.bridge.regs.m5_progress_registers());
+            }
             for start in [0x4a58usize, 0x4ad8, 0x4b58] {
                 pr_err!("asahi: recovery early status_b+{:#x}: {:x?}\n", start,
                     self.firmware.init.m5_status_b_words(start));

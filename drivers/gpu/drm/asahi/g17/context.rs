@@ -412,6 +412,7 @@ impl Context {
         compute_returns: Arc<super::availability::Availability>,
     ) -> Result<Self> {
         let status = execution.vm().status().ok_or(EINVAL)?.clone();
+        crate::mmu::diag_note_context_pid(execution.id() as usize, owner_pid);
         let hold = execution.hold(super::channel::control_fence)?;
         let qos = qos.acquire()?;
         // On M5 only the firmware reads and writes the scheduler and work-state pages; the GPU

@@ -144,6 +144,15 @@ impl Generation {
             }
             Views::M5 { board, .. } => {
                 let layout = Layout::m5(board);
+                // Experiment (`m5_ctxstore_clear`, GPU_J704_TIMEOUT.md round 7): zero the whole
+                // context store, as a fresh allocation is, before the viewport words are written.
+                if crate::module_parameters::m5_ctxstore_clear.value() != 0 {
+                    static LOGGED: core::sync::atomic::AtomicBool =
+                        core::sync::atomic::AtomicBool::new(false);
+                    crate::mmu::diag_log_once(&LOGGED, format_args!(
+                        "m5_ctxstore_clear: M5 context store zeroed before every render"));
+                    self.state.bytes_mut()[layout.deflake..layout.status].fill(0);
+                }
                 self.state.bytes_mut()[layout.status..layout.status + mmu::UAT_PGSZ].fill(0);
                 layout
             }
@@ -167,6 +176,15 @@ impl Generation {
                     base + layout.auxiliary as u64]
             }
         }
+    }
+
+    /// Diagnostics: the M5 context store's first 0xc0 bytes (per-cluster control words) and the
+    /// first 0x40 bytes of the stage status page (TA status +0, 3D status +8). Torn reads.
+    pub(in crate::g17) fn diag_ta_state(&self) -> Option<(&[u8], &[u8])> {
+        let Views::M5 { board, .. } = &self.views else { return None };
+        let layout = Layout::m5(board);
+        let bytes = self.state.bytes();
+        Some((bytes.get(..0xc0)?, bytes.get(layout.status..layout.status + 0x40)?))
     }
 
     pub(in crate::g17) fn retire(&mut self, ordinal: u64) -> Result {

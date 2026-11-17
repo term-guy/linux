@@ -9,6 +9,7 @@ mod observation;
 pub(crate) use observation::Observed;
 mod dependencies;
 mod memory;
+pub(crate) mod shape;
 pub(crate) mod parked;
 pub(super) mod publication;
 pub(crate) mod retirement;
@@ -153,6 +154,8 @@ struct Prepared {
     /// M5 kick register arrays and header flags, encoded with the commands.
     register_arrays: Option<[[Option<crate::g17::fw::kick::RegisterArrayBinding>; 4]; 2]>,
     kick_flags: Option<crate::g17::fw::kick::StageKickFlags>,
+    /// Diagnostics: the pass shape captured when the commands were encoded.
+    shape: Option<KBox<shape::Shape>>,
 }
 struct Active {
     /// Publication number, shared with compute (crate::g17::timeout).
@@ -184,6 +187,8 @@ struct Active {
     link_diag: Option<KBox<LinkDiag>>,
     /// Diagnostics: CNTVCT (the GPU stamps' 24 MHz time base) when the kicks were published.
     published_cnt: u64,
+    /// Diagnostics: the pass shape (GPU_J704_TIMEOUT.md round 7).
+    shape: Option<KBox<shape::Shape>>,
 }
 
 /// Diagnostics: the last device-control records published: [opcode, time in GPU stamp ticks].
@@ -429,6 +434,7 @@ pub(crate) fn report_link_counters() {
         crate::g17::context::DIAG_NODE_SETTLE_WAITS.load(Relaxed),
         crate::g17::context::DIAG_RENDER_ADDS.load(Relaxed),
         crate::g17::context::DIAG_RENDER_REARM.load(Relaxed));
+    shape::report_counts();
 }
 
 /// A firmware-retired, unexecuted group must hold on two observations this far
@@ -516,6 +522,8 @@ pub(crate) struct Pair {
     /// Diagnostics: the last renders retired here: (kicks, TA barrier words, stage timestamps).
     retired_ring: [([u64; 2], [u64; 2], [u64; 4]); 4],
     retired_next: usize,
+    /// Diagnostics: shapes of the last renders retired here (with `m5_diag_shape`).
+    shape_ring: shape::Ring,
     drain_retry_at: u64,
 }
 
@@ -651,6 +659,7 @@ impl Pair {
             drain_failures: 0,
             retired_ring: [([0; 2], [0; 2], [0; 4]); 4],
             retired_next: 0,
+            shape_ring: shape::Ring::new(),
             drain_retry_at: 0,
             channel_error: false,
         }))
@@ -827,7 +836,7 @@ impl Pair {
             tilemap_va: target.tilemap,
             layermeta_va: target.layer,
             heapmeta_va: target.heap,
-            tpc_va: self.memory.target.tpc_va(),
+            tpc_va: target.tpc,
             tpc_size: layout.tpc_size as u64,
             gtp_va: self.memory.target.gtp_va(&layout)?,
             deflake_va: deflake,
@@ -868,6 +877,12 @@ impl Pair {
             ta_mode_1: self.variant.ta_mode_1,
             deflake: deflake_layout,
         };
+        // Diagnostics: the pass shape (GPU_J704_TIMEOUT.md round 7); None if not allocated.
+        if self.memory.graph.is_m5() && crate::module_parameters::m5_diag_shape.value() != 0 {
+            self.shape_ring.reserve_empty();
+        }
+        let mut shape = if self.memory.graph.is_m5() { self.shape_ring.take() } else { None };
+        let shape_attachments = (attachments[0].as_slice().len(), attachments[1].as_slice());
         self.memory.graph.claim(ordinal)?;
         // Without an MCache table kick-entry bit 58 stays clear.
         let attachments = match self.variant.mcache {
@@ -881,6 +896,8 @@ impl Pair {
                     &layout,
                     programs.as_ref().and(*plan),
                     programs.as_ref().map_or(0, |p| p.mesh_class()),
+                    shape_attachments.1.len(),
+                    shape.as_deref_mut().map(|shape| (shape, shape_attachments)),
                 )
                 .map(|(arrays, flags)| (None, Some(arrays), Some(flags)))
         } else {
@@ -905,6 +922,7 @@ impl Pair {
             mcache,
             register_arrays,
             kick_flags,
+            shape,
         });
         Ok(())
     }
@@ -1476,6 +1494,10 @@ impl Pair {
         let flist_submission = self.free_list.prepare_submission(2)?;
         let pm_submission = memory.manager.prepare_submission()?;
         let published = host.next_publication()?;
+        let mut shape = self.prepared.as_mut().and_then(|prepared| prepared.shape.take());
+        if let Some(shape) = shape.as_deref_mut() {
+            shape.publish(qids, [kicks[0].get(), kicks[1].get()]);
+        }
         self.active
             .push(Active {
                 published,
@@ -1505,6 +1527,7 @@ impl Pair {
                 link_diag,
                 published_cnt: diag_cntvct(),
                 barrier_types: diag_types,
+                shape,
             })
             .map_err(|_| EBUSY)?;
         self.prepared = None;
@@ -1787,7 +1810,24 @@ impl Pair {
         packet: &Arc<Packet>,
         defer: &mut impl FnMut(Deferred) -> Result,
     ) -> Result {
+        // Experiment (`m5_vm_flush` >= 2): the context's whole ASID before the kicks are published.
+        if crate::module_parameters::m5_vm_flush.value() >= 2 {
+            crate::mmu::diag_flush(Some(packet.context.id() as u8));
+        }
         let publish = (|| {
+            // Diagnostics: target words +0 and +0x1000 as the CPU sees them before the outer
+            // records are published (should be zero: cleared at prepare, nothing published yet).
+            if crate::module_parameters::m5_diag_shape.value() != 0 {
+                let tilemap = self.active.back().and_then(|active| active.shape.as_deref())
+                    .map(|found| found.tilemap_va());
+                if let Some(tilemap) = tilemap {
+                    let words = self.memory.target.diag_view(tilemap, 0x1008)
+                        .map_or([u64::MAX; 2], |view| [shape::read(view, 0, 8), shape::read(view, 0x1000, 8)]);
+                    if let Some(found) = self.active.back_mut().and_then(|active| active.shape.as_deref_mut()) {
+                        found.note_readback(words);
+                    }
+                }
+            }
             host.activate_render_pool(self.free_list.id(), free_list_generation)?;
             host.publish_retained_pair(priority, fragment_slot, tiling_slot, outer_next)?;
             self.active.back_mut().ok_or(EIO)?.outer_published = true;
@@ -1893,6 +1933,124 @@ impl Pair {
             }
             active.packet.context.diag_dump_work();
         }
+    }
+    /// Diagnostics: the shape of the active render one of whose kicks `word` (0xc078:
+    /// qid << 40 | kick) names, and that stage (0 TA, 1 3D).
+    pub(crate) fn shape_named(&self, word: u64) -> Option<(&shape::Shape, usize)> {
+        self.active.iter().find_map(|active| {
+            let shape = active.shape.as_deref()?;
+            shape.names(word).map(|stage| (shape, stage))
+        })
+    }
+    /// Diagnostics: prints what the driver's mappings show of `shape`'s render memory now.
+    pub(crate) fn report_shape_views(&self, shape: &shape::Shape, tag: &str) {
+        shape.report_vm_live(tag);
+        let mut tastat = [0u8; 0x100];
+        if let Some((store, status)) = self.memory.diag_ta_state(shape.ordinal) {
+            let n = store.len().min(0xc0);
+            tastat[..n].copy_from_slice(&store[..n]);
+            let m = status.len().min(0x40);
+            tastat[0xc0..0xc0 + m].copy_from_slice(&status[..m]);
+        }
+        shape.report_tastat(tag);
+        shape::report_tastat(tag, [u64::MAX; 2], &tastat);
+        let stamps = self.memory.stage_timestamps(shape.ordinal).unwrap_or([0; 4]);
+        shape::report_views(tag, &shape::views(shape, &self.memory.target, &self.memory.manager,
+            stamps));
+        // The parameter buffer's state header (shared by the pair's renders): live only.
+        let manager = &self.memory.manager;
+        shape::dump_words(tag, "pb", manager.diag_graph_view(manager.state_va(), 0x100).unwrap_or(&[]));
+        // The TA and 3D pointer words as encoded, and whether the command storage changed since.
+        let live = self.memory.graph.m5_storage_ref(shape.ordinal).ok().map(|storage| {
+            let (ta, fragment) = storage.split_at(
+                crate::g17::fw::m5::render_assembly::FRAGMENT_OFFSET.min(storage.len()));
+            shape::ptr_words(ta, fragment)
+        });
+        shape.report_ptrs(tag, live.as_ref());
+        // Retained replaced record objects: this ordinal's slot in each.
+        self.memory.target.diag_old_records(shape.ordinal, |index, seq, va, bytes| {
+            pr_err!("G17: shape {} oldtgt[{}]: seq={} va={:#x} +0={:#x} +8={:#x}\n", tag, index, seq,
+                va, shape::read(bytes, 0, 8), shape::read(bytes, 8, 8));
+        });
+        // Every slot of the record object: where did a region entry land (round 7)? Slots that
+        // are owned or hold a nonzero word, one line each.
+        self.memory.target.diag_all_slots(|slot, owner, cleared, w0, w1000| {
+            if owner != u64::MAX || w0 != 0 || w1000 != 0 {
+                pr_err!("G17: shape {} slot[{}]: owner={:#x} last_clear={:#x} w0={:#x} meta={:#x}\n",
+                    tag, slot, owner, cleared, w0, w1000);
+            }
+        });
+        // The TVB pages the free list handed out last (state consumer cursor), now.
+        let c = manager.diag_pb_cursors();
+        pr_err!("G17: shape {} pb_cursors: pages={:#x} block_capacity={:#x} producer={:#x} consumer={:#x} last_page={:#x} control total={:#x} committed={:#x} read={:#x}\n",
+            tag, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+        let pages = c[0];
+        if pages == 0 || pages == u64::MAX {
+            return;
+        }
+        let index = |cursor: u64, back: u64| ((cursor % pages + pages - back % pages) % pages) as usize;
+        for (name, cursor) in [("consumer", c[3]), ("producer", c[2]), ("read", c[7])] {
+            if cursor == u64::MAX {
+                continue;
+            }
+            let mut list = [0u32; 8];
+            for (back, entry) in list.iter_mut().enumerate() {
+                *entry = manager.diag_page(index(cursor, 8 - back as u64)).map_or(u32::MAX, |(page, _)| page);
+            }
+            pr_err!("G17: shape {} pagelist {}-8..{}-1 (cursor {:#x} mod pages): {:x?}\n",
+                tag, name, name, cursor, list);
+        }
+        const NAMES: [&str; 4] = ["tapage[0]", "tapage[1]", "tapage[2]", "tapage[3]"];
+        for (back, name) in NAMES.iter().enumerate() {
+            let list_index = index(c[3], back as u64 + 1);
+            let Some((page, va)) = manager.diag_page(list_index) else { continue };
+            let view = manager.diag_tvb_view(va, 0x100);
+            pr_err!("G17: shape {} {} page={:#x} va={:#x} list_index={:#x} (consumer-{}) block={:?}\n",
+                tag, name, page, va, list_index, back + 1, view.map(|(block, _)| block));
+            shape::dump_words(tag, name, view.map_or(&[][..], |(_, bytes)| bytes));
+        }
+    }
+    /// Diagnostics: up to `budget` active renders other than `exclude` (3D qid, ordinal) whose
+    /// TA has ended: stamps, target words +0 and +0x1000, scene +0x10 and `used`, read live.
+    pub(crate) fn report_inflight(&self, exclude: Option<(u8, u64)>, budget: &mut usize) {
+        let qid = self.qids()[1];
+        for active in self.active.iter() {
+            if *budget == 0 {
+                return;
+            }
+            let ordinal = active.ticket.ordinal;
+            if exclude == Some((qid, ordinal)) {
+                continue;
+            }
+            let Some(found) = active.shape.as_deref() else { continue };
+            let stamps = self.memory.stage_timestamps(ordinal).unwrap_or([0; 4]);
+            if stamps[1] == 0 {
+                continue;
+            }
+            const TAGS: [&str; 3] = ["inflight0", "inflight1", "inflight2"];
+            let tag = TAGS[3 - *budget];
+            *budget -= 1;
+            let tgt = self.memory.target.diag_view(found.tilemap_va(), 0x1008).unwrap_or(&[]);
+            let scene = self.memory.manager.diag_graph_view(found.scene_va(), 0x50).unwrap_or(&[]);
+            found.report_id(tag);
+            found.report_vm_live(tag);
+            pr_err!("G17: shape {} ordinal={} qids={:?} kicks=[{:#x}, {:#x}] stamps ta {:#x}..{:#x} 3d {:#x}..{:#x} tgt+0={:#x} tgt+0x1000={:#x} scene+0x10={:#x} used={:#x}\n",
+                tag, ordinal, self.qids(), active.kicks[0].get(), active.kicks[1].get(), stamps[0],
+                stamps[1], stamps[2], stamps[3], shape::read(tgt, 0, 8), shape::read(tgt, 0x1000, 8),
+                shape::read(scene, 0x10, 8), shape::read(scene, 0x48, 4));
+        }
+    }
+    /// Diagnostics: the shape of the oldest active render, if captured.
+    pub(crate) fn shape_oldest(&self) -> Option<&shape::Shape> {
+        self.active.front().and_then(|active| active.shape.as_deref())
+    }
+    /// Diagnostics: the last healthy render of this pair with an empty region entry.
+    pub(crate) fn shape_empty(&self) -> Option<&shape::Shape> {
+        self.shape_ring.empty()
+    }
+    /// Diagnostics: the shapes of the renders retired last on this pair.
+    pub(crate) fn shapes_retired(&self) -> impl Iterator<Item = &shape::Shape> + Clone {
+        self.shape_ring.iter()
     }
     /// Diagnostics: the last renders retired on this pair.
     pub(crate) fn report_retired(&self) {
@@ -2522,6 +2680,20 @@ impl Pair {
             let next = self.retired_next;
             self.retired_ring[next % 4] = entry;
             self.retired_next = next.wrapping_add(1);
+        }
+        // Diagnostics: keep the retired shape for comparison at a recovery (never allocates).
+        // The TA and 3D have completed: copy the target record, scene entry and tile stream as
+        // the driver's mappings show them, before the slot is reused.
+        if let Some(mut shape) = front.shape.take() {
+            if crate::module_parameters::m5_diag_shape.value() != 0 {
+                let views = shape::views(&shape, &self.memory.target, &self.memory.manager,
+                    timestamps);
+                shape.store_content(&views);
+                shape.store_tastat(self.memory.diag_ta_state(ordinal));
+                self.shape_ring.push(shape);
+            } else {
+                self.shape_ring.recycle(shape);
+            }
         }
         if stampless {
             retirement::note_stampless(u16::from(self.slot), ordinal);

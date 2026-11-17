@@ -35,6 +35,7 @@ impl Registry {
         for pair in self.render.entries.iter().flatten().filter_map(|entry| entry.pair.as_ref()) {
             pair.report_retired();
         }
+        self.report_render_shapes(qid);
         let mut stamps = [0u32; 128];
         for (q, stamp) in stamps.iter_mut().enumerate() {
             *stamp = port.stamp(q as u8).unwrap_or(u32::MAX);
@@ -44,6 +45,36 @@ impl Registry {
         }
         for chunk in 0..8 {
             pr_warn!("G17: recovery stamps q{}..: {:x?}\n", chunk * 16, &stamps[chunk * 16..chunk * 16 + 16]);
+        }
+    }
+
+    /// Diagnostics (GPU_J704_TIMEOUT.md round 7): the pass shape of the culprit render, found by
+    /// the queue id and kick in 0xc078 among every pair's active renders, else the oldest active
+    /// render of the blamed queue's pair; then healthy retired shapes for comparison.
+    fn report_render_shapes(&self, blamed: u8) {
+        use crate::g17::queue::render::shape;
+        let pairs = || self.render.entries.iter().flatten().filter_map(|entry| entry.pair.as_ref());
+        let word = shape::FAULT_KICK.load(core::sync::atomic::Ordering::Relaxed);
+        let named = (word != u64::MAX)
+            .then(|| pairs().find_map(|pair| pair.shape_named(word).map(|found| (pair, found))))
+            .flatten()
+            .map(|(pair, (found, stage))| (pair, found, if stage == 0 { "c078 qid+kick (TA kick)" }
+                else { "c078 qid+kick (3D kick)" }));
+        let culprit = named.or_else(|| {
+            let pair = pairs().find(|pair| pair.qids().contains(&blamed))?;
+            pair.shape_oldest().map(|found| (pair, found,
+                "fallback: oldest active render of the blamed queue (no qid+kick match)"))
+        });
+        shape::report(culprit.map(|(_, found, how)| (found, how)), blamed,
+            pairs().flat_map(|pair| pair.shapes_retired()),
+            pairs().filter_map(|pair| pair.shape_empty()),
+            |found| if let Some((pair, _, _)) = culprit { pair.report_shape_views(found, "culprit") });
+        if crate::module_parameters::m5_diag_shape.value() != 0 {
+            let exclude = culprit.map(|(pair, found, _)| (pair.qids()[1], found.ordinal));
+            let mut budget = 3;
+            for pair in pairs() {
+                pair.report_inflight(exclude, &mut budget);
+            }
         }
     }
 

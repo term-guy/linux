@@ -218,6 +218,38 @@ module! {
             default: 0,
             description: "M5 experiment: region C idle standby timer in us (0: the board's value)",
         },
+        m5_diag_progress: u32 {
+            default: 0,
+            description: "M5 diagnostics: 1 also reads the firmware's lockup progress registers through the host tag port at a recovery (0: only the firmware's stored snapshot)",
+        },
+        m5_diag_shape: u32 {
+            default: 1,
+            description: "M5 diagnostics: 1 keeps the pass shapes of the last retired renders per pair and prints up to four at a recovery next to the culprit's (0: the culprit's only)",
+        },
+        m5_empty_tile_mode: u32 {
+            default: 0,
+            description: "M5 experiment: encode 3D commands as not processing empty tiles: 1 for passes without attachments or depth/stencil, 2 for all passes (0: as submitted)",
+        },
+        m5_vm_flush: u32 {
+            default: 0,
+            description: "M5 experiment: 1 invalidates the whole GPU TLB at every execution-context assignment and new render pair, 2 also the context's ASID before every render publication (0: off)",
+        },
+        m5_page_tlbi: u32 {
+            default: 0,
+            description: "M5 experiment: 1 invalidates GPU TLB ranges page by page instead of with range operations (0: off)",
+        },
+        m5_tpc_slot: u32 {
+            default: 0,
+            description: "M5 experiment: 1 gives every render record slot its own TPC slice, zeroed at prepare (0: one TPC per render pair, never cleared)",
+        },
+        m5_ctxstore_clear: u32 {
+            default: 0,
+            description: "M5 experiment: 1 zeroes the whole M5 context store before every render (0: only the status page and viewport words are rewritten)",
+        },
+        m5_target_clear: u32 {
+            default: 0,
+            description: "M5 experiment: target record clear at prepare: 1 followed by dsb sy and a readback, 2 leaves the tile map uncleared, 3 clears at the owner's retirement instead (0: as is)",
+        },
         m5_pool_scale: u32 {
             default: 1,
             description: "M5 experiment: provision this many times the computed private-memory pool blocks (1: as computed)",

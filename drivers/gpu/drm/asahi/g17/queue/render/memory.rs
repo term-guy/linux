@@ -650,6 +650,10 @@ impl Memory {
             mmu::PROT_GPU_SHARED_RO,
             0,
         )?) };
+        // Experiment (`m5_vm_flush`): the whole GPU TLB once this pair's objects are mapped.
+        if m5 && crate::module_parameters::m5_vm_flush.value() != 0 {
+            crate::mmu::diag_flush(None);
+        }
         Ok((
             storage.write_init(kernel::try_init!(Self {
                 graph,
@@ -690,6 +694,17 @@ impl Memory {
         }
         let storage = self.mesh_storage.as_ref().ok_or(ENOMEM)?;
         Ok((storage.address & 0xffff_ffff_ffff) | (u64::from(self.mesh_storage_chunks) << 48))
+    }
+    /// Diagnostics: `ordinal`'s TA context-store head and stage status words (Generation).
+    pub(super) fn diag_ta_state(&self, ordinal: u64) -> Option<(&[u8], &[u8])> {
+        let generation = self.generations[ordinal as usize % self.generation_count].as_ref()?;
+        if generation.ordinal() != Some(ordinal) {
+            return None;
+        }
+        match generation {
+            Generation::M5(generation) => generation.diag_ta_state(),
+            Generation::Neo(_) => None,
+        }
     }
     pub(super) fn generation(&mut self, ordinal: u64) -> Result<&mut Generation> {
         self.generations[ordinal as usize % self.generation_count]
@@ -802,12 +817,40 @@ impl Memory {
         layout: &target::Layout,
         plan: Option<crate::g17::render_resources::Plan>,
         mesh_class: u8,
+        fragment_attachments: usize,
+        shape: Option<(&mut super::shape::Shape, (usize, &[fw::kick::WriteRange]))>,
     ) -> Result<([[Option<fw::kick::RegisterArrayBinding>; 4]; 2], fw::kick::StageKickFlags)> {
         use super::m5_render_submission as render_submission;
         use fw::m5::{render_assembly, render_registers};
         if !self.graph.m5 {
             return Err(EINVAL);
         }
+        // Experiment (`m5_empty_tile_mode`, off by default; GPU_J704_TIMEOUT.md round 7): encode
+        // the 3D as if the pass did not process empty tiles, 1 for passes without attachments
+        // or depth/stencil, 2 for every pass. The whole M5 encoding (common register lowering,
+        // apply_pass and the M5 register adaptation) reads the same overridden pass, so the
+        // 0x10039 action bits, tile flags and command flags stay consistent.
+        let mode = crate::module_parameters::m5_empty_tile_mode.value();
+        let applies = args.pass.process_empty_tiles && match mode {
+            1 => fragment_attachments == 0 && args.pass.depth.va == 0 && args.pass.stencil.va == 0,
+            2 => true,
+            _ => false,
+        };
+        let overridden_pass;
+        let overridden_args;
+        let args = if applies {
+            static LOGGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                let class = if mode == 1 { "attachmentless, depth/stencil-less" } else { "all" };
+                pr_warn!("G17: experiment: m5_empty_tile_mode {}: 3D commands of {} passes skip empty tiles\n",
+                    mode, class);
+            }
+            overridden_pass = abi::RenderPass { process_empty_tiles: false, ..*args.pass };
+            overridden_args = abi::RenderArgs { pass: &overridden_pass, ..*args };
+            &overridden_args
+        } else {
+            args
+        };
         let mut controls = render_submission::controls(args.pass, self.board.ok_or(EINVAL)?)?;
         if let Some(stages) = plan.and_then(|p| p.stages) {
             controls.ta.scs = stages[0].scs;
@@ -827,6 +870,11 @@ impl Memory {
         let encoded = render_assembly::encode_into(self.graph.m5_storage(args.ordinal)?, low,
             args, &controls, extra, render_registers::FragmentDispatch { words: [0; 2] },
             &inputs, workspace)?;
+        if let Some((shape, attachments)) = shape {
+            shape.capture(args, layout, &controls, &inputs, workspace, attachments,
+                self.context.owner_pid());
+            shape.note_empty_override(applies, mode);
+        }
         Ok((encoded.rce, encoded.kick_flags))
     }
 
