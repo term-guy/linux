@@ -5,8 +5,6 @@
  *
  * Not for upstream as is: each override works around something not yet
  * understood or not yet supported on the J704.
- *
- * Copyright The Asahi Linux Contributors
  */
 
 #include "t8142-j704.dts"
