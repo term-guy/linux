@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Apple MacBook Pro (14-inch, M5, 2025): bring-up overrides for the Fedora
+ * Aurora install, booted aura -> U-Boot -> GRUB from the internal SSD.
+ *
+ * Not for upstream as is: each override works around something not yet
+ * understood or not yet supported on the J704.
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+#include "t8142-j704.dts"
+
+/*
+ * The U-Boot this boots through matches only the t8132 ANS2 compatible; aura
+ * treats the T8142 ANS like the T8132 one (same split layout).
+ */
+&nvme {
+	compatible = "apple,t8142-nvme-ans2", "apple,t8140-nvme-ans2",
+		     "apple,t8132-nvme-ans2";
+};
+
+/* With these enabled the kernel freezes early, silently. Cause not known. */
+&pcie0_msi {
+	status = "disabled";
+};
+
+&pcie0_dart {
+	status = "disabled";
+};
+
+&pcie2_dart {
+	status = "disabled";
+};
+
+/* The right-port PD controller drops the gadget link. */
+&hpm3 {
+	status = "disabled";
+};
+
+/*
+ * Right port: plain dwc3 in device mode (USB 2.0) for the USB network and
+ * console the host uses to reach the Mac, with the two T8142 gadget
+ * workarounds of the dwc3 driver.
+ */
+&typec3_hs {
+	/delete-property/ remote-endpoint;
+};
+
+&atcphy3_usb {
+	/delete-property/ remote-endpoint;
+};
+
+&dwc3_3 {
+	compatible = "snps,dwc3";
+	reg = <0x4 0x1a280000 0x0 0xcd00>;
+	/delete-property/ reg-names;
+	/delete-property/ resets;
+	/delete-property/ phys;
+	/delete-property/ phy-names;
+	/delete-property/ usb-role-switch;
+	/delete-property/ role-switch-default-mode;
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	snps,dis_u2_susphy_quirk;
+	snps,dis_u3_susphy_quirk;
+	apple,j704-usb2-reset-cycle;
+	apple,int-in-as-bulk;
+	/delete-node/ ports;
+};
