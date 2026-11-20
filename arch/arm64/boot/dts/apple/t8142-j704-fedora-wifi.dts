@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * J704 Fedora test tree: BCM4388 Wi-Fi/Bluetooth on apcie port 0 only.
+ *
+ * aura trains port 0 (j813_n1_prepare, accepting the Broadcom endpoint) but
+ * not port 2 (SD reader), so this tree uses port 0 exactly as J813 does: ECAM
+ * buses 0-1, port 0's MSI block only, port 0's DART. Port 2 stays off until
+ * the bootloader trains it.
+ */
+
+#include "t8142-j704-fedora.dts"
+
+&pcie0 {
+	bus-range = <0 1>;
+	reg = <0x1c 0xb0000000 0 0x200000>;
+	iommu-map = <0x100 &pcie0_dart 0 1>,
+		    <0x101 &pcie0_dart 0 1>;
+	/delete-node/ pci@2,0;
+};
+
+&pcie0_msi {
+	reg = <0x4 0x88028000 0x0 0x8000>;
+	status = "okay";
+};
+
+&pcie0_dart {
+	status = "okay";
+};
