@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * J704 Fedora test tree: the Wi-Fi tree plus the HDMI port (DCPEXT1 -> ATC2
+ * -> DP-to-HDMI converter), see t8142-j704-hdmi.dtsi. Needs a boot loader
+ * with the T8142 external display handoff.
+ */
+
+#include "t8142-j704-fedora-wifi.dts"
+#include "t8142-j704-hdmi.dtsi"
